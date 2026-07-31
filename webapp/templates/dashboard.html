@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard &middot; Meta-Analysis Pipeline</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">Meta<span class="accent">Extract</span></div>
+  <div class="project-switcher" id="project-switcher"></div>
+  <nav class="app-nav" id="app-nav">
+    <a href="/">Corpus</a>
+    <a href="/results">Filter results</a>
+    <a href="/cheap-ai">Cheap AI</a>
+    <a href="/detection-ai">Detection AI</a>
+    <a href="/main-ai">Main AI</a>
+    <a href="/regression">Regression</a>
+    <a href="/dashboard" class="active">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </nav>
+</header>
+
+<div class="dash-layout">
+  <div class="dash-header">
+    <div class="dash-title">Key findings</div>
+    <div class="dash-sub">A summary of the corpus, the extracted elasticity dataset, and any regression specifications run so far.</div>
+  </div>
+
+  <div class="dash-filter-bar" id="dash-filter-bar"></div>
+
+  <div class="dash-cards" id="dash-cards"></div>
+
+  <div class="dash-section">
+    <div class="dash-section-title">Coverage</div>
+    <div class="dash-coverage-grid" id="dash-coverage"></div>
+  </div>
+
+  <div class="dash-section">
+    <div class="dash-section-title">Regression results</div>
+    <div class="regression-table-wrap" id="dash-reg-wrap">
+      <div class="manuscript-empty" id="dash-reg-empty">
+        <div class="big">No regressions run yet</div>
+        <div>Build and run a model on the <a href="/regression">Regression</a> page — saved specifications will appear here as columns.</div>
+      </div>
+      <table class="reg-table" id="dash-reg-table" hidden></table>
+    </div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

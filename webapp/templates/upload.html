@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Corpus &middot; Meta-Analysis Pipeline</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">Meta<span class="accent">Extract</span></div>
+  <div class="project-switcher" id="project-switcher"></div>
+  <nav class="app-nav">
+    <a href="/" class="active">Corpus</a>
+    <a href="/results">Filter results</a>
+    <a href="/cheap-ai">Cheap AI</a>
+    <a href="/detection-ai">Detection AI</a>
+    <a href="/main-ai">Main AI</a>
+    <a href="/regression">Regression</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </nav>
+</header>
+
+<div class="upload-layout">
+
+  <!-- Papers panel -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Papers</h2>
+      <span class="count mono" id="paper-count">0 uploaded</span>
+    </div>
+    <div class="panel-body">
+      <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload PDF papers">
+        <div class="dropzone-icon">&#8593;</div>
+        <div class="dropzone-title">Drop PDFs here, or click to browse</div>
+        <div class="dropzone-sub">Macroeconomic papers, one file per PDF</div>
+        <input type="file" id="file-input" accept="application/pdf" multiple>
+      </div>
+
+      <div class="file-list" id="file-list"></div>
+      <div class="empty-note" id="empty-note">No papers uploaded yet.</div>
+    </div>
+  </section>
+
+  <!-- Targets panel -->
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Elasticity / Product targets</h2>
+    </div>
+    <div class="panel-body">
+      <div class="target-group">
+        <div class="target-label elasticity"><span class="swatch"></span>Elasticity types</div>
+        <div class="tag-input-box" id="elasticity-box">
+          <input type="text" id="elasticity-input" placeholder="e.g. Own-price Elasticity">
+        </div>
+      </div>
+      <div class="target-group">
+        <div class="target-label product"><span class="swatch"></span>Products</div>
+        <div class="tag-input-box" id="product-box">
+          <input type="text" id="product-input" placeholder="e.g. maize">
+        </div>
+      </div>
+      <div class="hint">Press Enter or comma to add an entry. A cross-price elasticity matches two products from the same list — no need to enter combinations separately.</div>
+
+      <div class="analyze-bar">
+        <button class="btn-primary" id="analyze-btn">Analyze</button>
+        <span class="analyze-status" id="analyze-status"></span>
+      </div>
+
+      <div class="results-summary" id="results-summary">
+        <div class="row"><span>Papers parsed</span><span class="v" id="s-papers">—</span></div>
+        <div class="row"><span>Parse failures</span><span class="v" id="s-failed">—</span></div>
+        <div class="row"><span>Chunks total</span><span class="v" id="s-chunks">—</span></div>
+        <div class="row"><span>Chunks kept</span><span class="v" id="s-kept">—</span></div>
+        <a href="/results" class="cta">Go to next stage: Filter results &rarr;</a>
+      </div>
+    </div>
+  </section>
+
+</div>
+
+<script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
+<script src="{{ url_for('static', filename='js/upload.js') }}"></script>
+</body>
+</html>

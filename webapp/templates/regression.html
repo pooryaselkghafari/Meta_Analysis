@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Regression &middot; Meta-Analysis Pipeline</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">Meta<span class="accent">Extract</span></div>
+  <div class="project-switcher" id="project-switcher"></div>
+  <nav class="app-nav" id="app-nav">
+    <a href="/">Corpus</a>
+    <a href="/results">Filter results</a>
+    <a href="/cheap-ai">Cheap AI</a>
+    <a href="/detection-ai">Detection AI</a>
+    <a href="/main-ai">Main AI</a>
+    <a href="/regression" class="active">Regression</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </nav>
+</header>
+
+<div class="regression-layout">
+
+  <div class="regression-panel">
+    <div class="regression-panel-title">Build a model</div>
+    <div class="regression-panel-sub">Meta-regression over the extracted records: pick a dependent variable and one or more independent variables (study/paper characteristics), and fit an OLS model. Each run is added as its own column below, like a published paper's regression table.</div>
+
+    <label class="field-label">Dependent variable</label>
+    <select class="field-input mono" id="dv-select"></select>
+
+    <label class="field-label">Independent variables</label>
+    <div class="iv-groups" id="iv-groups"></div>
+
+    <label class="field-label">Filters (optional)</label>
+    <div class="iv-groups" id="filter-groups"></div>
+
+    <label class="review-filter" style="margin-top:14px">
+      <input type="checkbox" id="weight-checkbox"> Weight by precision (inverse-variance / WLS, weight = 1/SE&sup2;)
+    </label>
+
+    <label class="field-label">Column label (optional)</label>
+    <input type="text" class="field-input" id="label-input" placeholder="e.g. Maize only, baseline spec…">
+
+    <button class="btn-primary" id="run-btn" style="margin-top:16px">Run regression</button>
+    <span class="analyze-status" id="run-status"></span>
+  </div>
+
+  <div class="regression-results">
+    <div class="regression-results-title">Results</div>
+    <div class="regression-table-wrap" id="regression-table-wrap">
+      <div class="manuscript-empty" id="regression-empty">
+        <div class="big">No regressions run yet</div>
+        <div>Build a model on the left and click "Run regression" — results appear here as numbered columns.</div>
+      </div>
+      <table class="reg-table" id="reg-table" hidden></table>
+    </div>
+  </div>
+
+</div>
+
+<script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
+<script src="{{ url_for('static', filename='js/regression.js') }}"></script>
+</body>
+</html>

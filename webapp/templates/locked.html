@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ page_title }} &middot; Meta-Analysis Pipeline</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">Meta<span class="accent">Extract</span></div>
+  <div class="project-switcher" id="project-switcher"></div>
+  <nav class="app-nav" id="app-nav">
+    <a href="/">Corpus</a>
+    <a href="/results">Filter results</a>
+    <a href="/cheap-ai">Cheap AI</a>
+    <a href="/detection-ai">Detection AI</a>
+    <a href="/main-ai">Main AI</a>
+    <a href="/regression">Regression</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </nav>
+</header>
+
+<div class="locked-shell">
+  <div class="locked-card">
+    <div class="locked-icon">&#128274;</div>
+    <div class="locked-title">{{ page_title }} isn't available yet</div>
+    <div class="locked-sub">This page needs <strong>{{ required_label }}</strong> to run first.</div>
+    <a class="btn-primary" href="{{ required_href }}">Go run {{ required_label }}</a>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
+</body>
+</html>

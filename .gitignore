@@ -1,0 +1,25 @@
+# API keys / model + provider settings
+ai_settings.json
+
+# Per-project data (uploaded PDFs, extracted records, targets, prompts,
+# project registry) — not code, and this repo is public, so paper content
+# and any extracted data stays local rather than getting pushed.
+projects/
+active_project.json
+
+# Legacy/stale scaffolding artifacts, not part of the running app
+output_papers/
+files/
+
+# Python
+__pycache__/
+*.pyc
+.Python
+*.egg-info/
+
+# OS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/

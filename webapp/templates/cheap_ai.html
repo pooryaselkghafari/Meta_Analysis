@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cheap AI &middot; Meta-Analysis Pipeline</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">Meta<span class="accent">Extract</span></div>
+  <div class="project-switcher" id="project-switcher"></div>
+  <nav class="app-nav">
+    <a href="/">Corpus</a>
+    <a href="/results">Filter results</a>
+    <a href="/cheap-ai" class="active">Cheap AI</a>
+    <a href="/detection-ai">Detection AI</a>
+    <a href="/main-ai">Main AI</a>
+    <a href="/regression">Regression</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </nav>
+</header>
+
+<div class="results-shell">
+  <aside class="thumb-rail" id="thumb-rail">
+    <div class="thumb-rail-label">Kept chunks, by paper</div>
+    <div id="thumb-list"></div>
+  </aside>
+
+  <main class="manuscript" id="manuscript">
+    <div class="manuscript-empty">
+      <div class="big">No paper selected</div>
+      <div>Run an analysis from the Corpus page, then pick a paper from the left.</div>
+    </div>
+  </main>
+</div>
+
+<div class="classify-bar" id="classify-bar">
+  <div class="classify-bar-info">
+    <div class="classify-bar-title">Stage 2 &middot; Cheap AI &mdash; classification</div>
+    <div class="classify-bar-sub" id="classify-sub">Labels every kept chunk as a regression table, result text, methodology, data description, literature review, or other.</div>
+    <div class="classify-progress" id="classify-progress" hidden>
+      <div class="classify-progress-track">
+        <div class="classify-progress-fill" id="classify-progress-fill"></div>
+      </div>
+      <div class="classify-progress-label" id="classify-progress-label"></div>
+    </div>
+  </div>
+  <button class="btn-primary" id="classify-btn">Classify all kept chunks</button>
+  <button class="btn-secondary" id="pause-btn" hidden>Pause</button>
+  <button class="btn-primary" id="next-stage-btn" disabled title="Classify all kept chunks first">Go to next stage: Detection AI &mdash; Detection &rarr;</button>
+  <span class="analyze-status" id="classify-status"></span>
+</div>
+
+<script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
+<script src="{{ url_for('static', filename='js/cheap_ai.js') }}"></script>
+</body>
+</html>

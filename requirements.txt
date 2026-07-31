@@ -1,0 +1,20 @@
+# Core LLM client (Anthropic — the default provider for all three AI slots)
+anthropic>=0.40.0
+
+# Optional — only needed if you point an AI slot (Settings page) at an
+# OpenAI or Google model instead of a Claude model:
+#   pip install openai
+#   pip install google-genai
+
+# Stage 1 — PDF parsing
+# Primary: Marker (heavy; installs torch). Install when ready for real papers:
+#   pip install marker-pdf
+# Fallback parsers used if Marker is absent:
+pdfminer.six>=20221105
+pypdf>=4.0.0
+flask>=3.0.0
+PyMuPDF>=1.24.0
+
+# Stage 5 — Regression (meta-analysis over the extracted records table)
+pandas>=2.0.0
+statsmodels>=0.14.0

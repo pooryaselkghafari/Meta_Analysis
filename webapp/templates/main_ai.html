@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Main AI &middot; Meta-Analysis Pipeline</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">Meta<span class="accent">Extract</span></div>
+  <div class="project-switcher" id="project-switcher"></div>
+  <nav class="app-nav">
+    <a href="/">Corpus</a>
+    <a href="/results">Filter results</a>
+    <a href="/cheap-ai">Cheap AI</a>
+    <a href="/detection-ai">Detection AI</a>
+    <a href="/main-ai" class="active">Main AI</a>
+    <a href="/regression">Regression</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </nav>
+</header>
+
+<div class="records-layout">
+  <div class="records-toolbar">
+    <div class="records-toolbar-left">
+      <select class="field-input mono" id="paper-filter">
+        <option value="">All papers</option>
+      </select>
+      <label class="review-filter mono">
+        <input type="checkbox" id="review-only-filter"> Needs review only
+      </label>
+    </div>
+    <div class="records-toolbar-right">
+      <button class="btn-secondary" id="add-row-btn">+ Add row</button>
+      <div class="records-count mono" id="records-count"></div>
+    </div>
+  </div>
+
+  <div class="records-table-wrap" id="records-table-wrap">
+    <table class="records-table" id="records-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Paper</th>
+          <th>Elasticity type</th>
+          <th>Product</th>
+          <th>Cross w/</th>
+          <th>Paper's elasticity wording</th>
+          <th>Paper's product wording</th>
+          <th>Match</th>
+          <th>Role</th>
+          <th>Type</th>
+          <th>Coef.</th>
+          <th>SE</th>
+          <th>Sig.</th>
+          <th>Spec</th>
+          <th>Review</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="records-tbody"></tbody>
+    </table>
+    <div class="manuscript-empty" id="records-empty" hidden>
+      <div class="big">No extraction results yet</div>
+      <div>Run Detection AI first if you haven't, then run extraction below.</div>
+    </div>
+  </div>
+</div>
+
+<div class="classify-bar" id="classify-bar">
+  <div class="classify-bar-info">
+    <div class="classify-bar-title">Stage 4 &middot; Main AI &mdash; extraction</div>
+    <div class="classify-bar-sub" id="extract-sub">Pulls structured point-estimate records out of every chunk Detection AI said yes to &mdash; one row per estimate, so a single table can yield several. This is the precision-biased final stage: some passed-through chunks will correctly yield zero records.</div>
+    <div class="classify-progress" id="extract-progress" hidden>
+      <div class="classify-progress-track">
+        <div class="classify-progress-fill" id="extract-progress-fill"></div>
+      </div>
+      <div class="classify-progress-label" id="extract-progress-label"></div>
+    </div>
+  </div>
+  <button class="btn-primary" id="extract-btn">Run extraction over detected chunks</button>
+  <button class="btn-secondary" disabled title="Validation AI hasn't been built yet">Next stage: Validation AI (coming soon)</button>
+  <span class="analyze-status" id="extract-status"></span>
+</div>
+
+<script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
+<script src="{{ url_for('static', filename='js/main_ai.js') }}"></script>
+</body>
+</html>

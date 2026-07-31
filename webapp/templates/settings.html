@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Settings &middot; Meta-Analysis Pipeline</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">Meta<span class="accent">Extract</span></div>
+  <div class="project-switcher" id="project-switcher"></div>
+  <nav class="app-nav">
+    <a href="/">Corpus</a>
+    <a href="/results">Filter results</a>
+    <a href="/cheap-ai">Cheap AI</a>
+    <a href="/detection-ai">Detection AI</a>
+    <a href="/main-ai">Main AI</a>
+    <a href="/regression">Regression</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/settings" class="active">Settings</a>
+  </nav>
+</header>
+
+<div class="settings-layout">
+  <div class="settings-intro">
+    <h1>AI settings</h1>
+    <p>Three independently configurable AI slots, one per pipeline role. Each can use a model from any of three providers &mdash; Anthropic (Claude), OpenAI (GPT), or Google (Gemini) &mdash; with its own API key and its own effort/thinking level (trading response thoroughness for token/latency cost). Effort isn't supported by every model &mdash; the dropdown only offers levels the selected model actually accepts, and shows "not applicable" otherwise.</p>
+    <p class="settings-warning">Keys are stored in plain text in <code>ai_settings.json</code> at the project root, for local use only &mdash; it's already excluded via <code>.gitignore</code>. Each slot keeps a separate key per provider, so switching a slot's model between providers won't overwrite the other provider's saved key. Leave a key field blank to keep the currently saved key for that provider.</p>
+  </div>
+
+  <form id="settings-form">
+
+    <section class="panel ai-slot">
+      <div class="panel-head">
+        <h2>Cheap AI</h2>
+        <span class="count mono">Stage 2 classification &middot; Stage 3 detection</span>
+      </div>
+      <div class="panel-body">
+        <label class="field-label" for="cheap-model">Model</label>
+        <select class="field-input mono" id="cheap-model"></select>
+        <label class="field-label" for="cheap-effort">Effort</label>
+        <select class="field-input mono" id="cheap-effort"></select>
+        <div class="key-status" id="cheap-effort-status"></div>
+        <label class="field-label" for="cheap-key">API key</label>
+        <input class="field-input mono" id="cheap-key" type="password" placeholder="sk-ant-...">
+        <div class="key-status" id="cheap-key-status"></div>
+
+        <div class="prompt-block">
+          <div class="prompt-block-title">Classification prompt <span class="mono">(Stage 2)</span></div>
+          <div class="prompt-tokens" data-tokens-for="classification"></div>
+          <label class="field-label" for="classification-system">System</label>
+          <textarea class="field-input mono prompt-textarea" id="classification-system" rows="4" placeholder="(blank — Stage 2 is a no-op until this is written)"></textarea>
+          <label class="field-label" for="classification-user">User</label>
+          <textarea class="field-input mono prompt-textarea" id="classification-user" rows="4" placeholder="e.g. Classify the chunk below...\n\n{{chunk_text}}"></textarea>
+        </div>
+
+        <div class="prompt-block">
+          <div class="prompt-block-title">Detection prompt <span class="mono">(Stage 3)</span></div>
+          <div class="prompt-tokens" data-tokens-for="detection"></div>
+          <label class="field-label" for="detection-system">System</label>
+          <textarea class="field-input mono prompt-textarea" id="detection-system" rows="4" placeholder="(blank — Stage 3's cheap-LLM check is a no-op until this is written)"></textarea>
+          <label class="field-label" for="detection-user">User</label>
+          <textarea class="field-input mono prompt-textarea" id="detection-user" rows="4" placeholder="e.g. Targets: {{targets}}\n\nChunk:\n{{chunk_text}}"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel ai-slot">
+      <div class="panel-head">
+        <h2>Main AI</h2>
+        <span class="count mono">Stage 4 merged extraction</span>
+      </div>
+      <div class="panel-body">
+        <label class="field-label" for="main-model">Model</label>
+        <select class="field-input mono" id="main-model"></select>
+        <label class="field-label" for="main-effort">Effort</label>
+        <select class="field-input mono" id="main-effort"></select>
+        <div class="key-status" id="main-effort-status"></div>
+        <label class="field-label" for="main-key">API key</label>
+        <input class="field-input mono" id="main-key" type="password" placeholder="sk-ant-...">
+        <div class="key-status" id="main-key-status"></div>
+
+        <div class="prompt-block">
+          <div class="prompt-block-title">Paper metadata prompt <span class="mono">(Stage 4a &mdash; once per paper)</span></div>
+          <div class="prompt-tokens" data-tokens-for="paper_metadata"></div>
+          <label class="field-label" for="paper_metadata-system">System</label>
+          <textarea class="field-input mono prompt-textarea" id="paper_metadata-system" rows="6" placeholder="(blank — Stage 4a is a no-op until this is written)"></textarea>
+          <label class="field-label" for="paper_metadata-user">User</label>
+          <textarea class="field-input mono prompt-textarea" id="paper_metadata-user" rows="6" placeholder="e.g. Abstract:\n{{abstract}}\n\nMethodology/data text:\n{{methodology_text}}"></textarea>
+        </div>
+
+        <div class="prompt-block">
+          <div class="prompt-block-title">Extraction prompt <span class="mono">(Stage 4)</span></div>
+          <div class="prompt-tokens" data-tokens-for="extraction"></div>
+          <label class="field-label" for="extraction-system">System</label>
+          <textarea class="field-input mono prompt-textarea" id="extraction-system" rows="8" placeholder="(blank — Stage 4 is a no-op until this is written)"></textarea>
+          <label class="field-label" for="extraction-user">User</label>
+          <textarea class="field-input mono prompt-textarea" id="extraction-user" rows="8" placeholder="e.g. Paper abstract (context only):\n{{abstract}}\n\nTargets: {{targets}}\nOntology: {{ontology}}\n\nChunk:\n{{chunk_text}}"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel ai-slot">
+      <div class="panel-head">
+        <h2>Validation AI</h2>
+        <span class="count mono">Stage 5 validation pass</span>
+      </div>
+      <div class="panel-body">
+        <label class="field-label" for="validation-model">Model</label>
+        <select class="field-input mono" id="validation-model"></select>
+        <label class="field-label" for="validation-effort">Effort</label>
+        <select class="field-input mono" id="validation-effort"></select>
+        <div class="key-status" id="validation-effort-status"></div>
+        <label class="field-label" for="validation-key">API key</label>
+        <input class="field-input mono" id="validation-key" type="password" placeholder="sk-ant-...">
+        <div class="key-status" id="validation-key-status"></div>
+
+        <div class="prompt-block">
+          <div class="prompt-block-title">Validation prompt <span class="mono">(Stage 5)</span></div>
+          <div class="prompt-tokens" data-tokens-for="validation"></div>
+          <label class="field-label" for="validation-system">System</label>
+          <textarea class="field-input mono prompt-textarea" id="validation-system" rows="4" placeholder="(blank — Stage 5's LLM pass is a no-op until this is written)"></textarea>
+          <label class="field-label" for="validation-user">User</label>
+          <textarea class="field-input mono prompt-textarea" id="validation-user" rows="4" placeholder="e.g. Record:\n{{record_json}}\n\nSource chunk:\n{{chunk_text}}"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <div class="analyze-bar">
+      <button class="btn-primary" type="submit" id="save-btn">Save settings</button>
+      <span class="analyze-status" id="save-status"></span>
+    </div>
+  </form>
+</div>
+
+<script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
+<script src="{{ url_for('static', filename='js/settings.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Detection AI &middot; Meta-Analysis Pipeline</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">Meta<span class="accent">Extract</span></div>
+  <div class="project-switcher" id="project-switcher"></div>
+  <nav class="app-nav">
+    <a href="/">Corpus</a>
+    <a href="/results">Filter results</a>
+    <a href="/cheap-ai">Cheap AI</a>
+    <a href="/detection-ai" class="active">Detection AI</a>
+    <a href="/main-ai">Main AI</a>
+    <a href="/regression">Regression</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </nav>
+</header>
+
+<div class="results-shell">
+  <aside class="thumb-rail" id="thumb-rail">
+    <div class="thumb-rail-label">Kept chunks, by paper</div>
+    <div id="thumb-list"></div>
+  </aside>
+
+  <main class="manuscript" id="manuscript">
+    <div class="manuscript-empty">
+      <div class="big">No paper selected</div>
+      <div>Run an analysis from the Corpus page, then pick a paper from the left.</div>
+    </div>
+  </main>
+</div>
+
+<div class="classify-bar" id="classify-bar">
+  <div class="classify-bar-info">
+    <div class="classify-bar-title">Stage 3 &middot; Cheap AI &mdash; detection</div>
+    <div class="classify-bar-sub" id="detect-sub">Screens each already-kept chunk: does it plausibly contain a point estimate for one of your target DV/IV pairs? A "no" is dropped from the kept set, same as the heuristic filter.</div>
+    <div class="classify-progress" id="detect-progress" hidden>
+      <div class="classify-progress-track">
+        <div class="classify-progress-fill" id="detect-progress-fill"></div>
+      </div>
+      <div class="classify-progress-label" id="detect-progress-label"></div>
+    </div>
+  </div>
+  <button class="btn-primary" id="detect-btn">Run detection over kept chunks</button>
+  <button class="btn-primary" id="next-stage-btn" disabled title="Run detection over kept chunks first">Go to next stage: Main AI &mdash; Extraction &rarr;</button>
+  <span class="analyze-status" id="detect-status"></span>
+</div>
+
+<script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
+<script src="{{ url_for('static', filename='js/detection_ai.js') }}"></script>
+</body>
+</html>

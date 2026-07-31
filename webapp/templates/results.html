@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Filter results &middot; Meta-Analysis Pipeline</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="app-title">Meta<span class="accent">Extract</span></div>
+  <div class="project-switcher" id="project-switcher"></div>
+  <nav class="app-nav">
+    <a href="/">Corpus</a>
+    <a href="/results" class="active">Filter results</a>
+    <a href="/cheap-ai">Cheap AI</a>
+    <a href="/detection-ai">Detection AI</a>
+    <a href="/main-ai">Main AI</a>
+    <a href="/regression">Regression</a>
+    <a href="/dashboard">Dashboard</a>
+    <a href="/settings">Settings</a>
+  </nav>
+</header>
+
+<div class="results-shell">
+  <aside class="thumb-rail" id="thumb-rail">
+    <div class="thumb-rail-label">Papers</div>
+    <div id="thumb-list"></div>
+  </aside>
+
+  <main class="manuscript" id="manuscript">
+    <div class="manuscript-empty">
+      <div class="big">No paper selected</div>
+      <div>Run an analysis from the Corpus page, then pick a paper from the left.</div>
+    </div>
+  </main>
+</div>
+
+<div class="classify-bar" id="stage-bar">
+  <div class="classify-bar-info">
+    <div class="classify-bar-title">Stage 1/3 &middot; Corpus &mdash; parse &amp; heuristic filter</div>
+    <div class="classify-bar-sub">This view reflects the Corpus page's last analysis run. Re-run it here if you've changed papers or targets, without leaving this page.</div>
+  </div>
+  <button class="btn-secondary" id="update-btn">Update analysis</button>
+  <button class="btn-primary" id="next-stage-btn">Go to next stage: Cheap AI &mdash; Classification &rarr;</button>
+  <span class="analyze-status" id="stage-status"></span>
+</div>
+
+<script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
+<script src="{{ url_for('static', filename='js/results.js') }}"></script>
+</body>
+</html>
