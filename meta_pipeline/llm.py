@@ -94,6 +94,30 @@ class LLMClient:
             return self._call_google(client, stage, system, user, tokens, effort, send_temperature)
         raise RuntimeError(f"Unknown provider '{provider}' for model {stage.model}")
 
+    @staticmethod
+    def _call_with_kwarg_fallback(fn, kwargs: Dict[str, Any], max_attempts: int = 6):
+        """Calls fn(**kwargs), and if the installed SDK's version of fn
+        doesn't accept one of these keywords (a plain Python TypeError,
+        distinct from the API itself rejecting a value), drops that keyword
+        and retries. Provider SDKs (anthropic/openai/google-genai) change
+        their accepted parameters across versions more often than this
+        codebase gets updated to match, and this runs on whatever version
+        happens to be installed on each user's machine — rather than crash
+        the whole call over one now-unsupported sampling knob like
+        `temperature` or `thinking_config`, degrade gracefully and still get
+        a response. `max_attempts` just bounds the loop; in practice at most
+        a couple of keywords are ever dropped."""
+        kwargs = dict(kwargs)
+        for _ in range(max_attempts):
+            try:
+                return fn(**kwargs)
+            except TypeError as e:
+                m = re.search(r"unexpected keyword argument '(\w+)'", str(e))
+                if not m or m.group(1) not in kwargs:
+                    raise
+                kwargs.pop(m.group(1))
+        return fn(**kwargs)
+
     def _call_anthropic(self, client, stage, system, user, tokens, effort, send_temperature) -> str:
         kwargs: Dict[str, Any] = dict(
             model=stage.model,
@@ -105,7 +129,7 @@ class LLMClient:
             kwargs["temperature"] = self.cfg.temperature
         if effort:
             kwargs["output_config"] = {"effort": effort}
-        resp = client.messages.create(**kwargs)
+        resp = self._call_with_kwarg_fallback(client.messages.create, kwargs)
         return "".join(
             block.text for block in resp.content if getattr(block, "type", None) == "text"
         )
@@ -124,7 +148,7 @@ class LLMClient:
         )
         if effort:
             kwargs["reasoning"] = {"effort": effort}
-        resp = client.responses.create(**kwargs)
+        resp = self._call_with_kwarg_fallback(client.responses.create, kwargs)
         return resp.output_text
 
     def _call_google(self, client, stage, system, user, tokens, effort, send_temperature) -> str:
@@ -144,10 +168,11 @@ class LLMClient:
             config_kwargs["temperature"] = self.cfg.temperature
         if effort:
             config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=effort)
+        config = self._call_with_kwarg_fallback(types.GenerateContentConfig, config_kwargs)
         resp = client.models.generate_content(
             model=stage.model,
             contents=user,
-            config=types.GenerateContentConfig(**config_kwargs),
+            config=config,
         )
         return resp.text or ""
 
