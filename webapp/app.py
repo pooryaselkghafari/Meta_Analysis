@@ -736,13 +736,26 @@ def _classifiable_chunks(chunks: list) -> list:
     ]
 
 
-# In-memory progress tracker for the currently running (or most recently run)
-# classification pass. The Flask dev server is single-process/single-user
-# here, so a module-level dict is sufficient — no need for a job queue or
-# database just to answer "which paper is it on right now". Read by
-# /api/cheap-ai/classify/progress, written to from inside cheap_ai_classify's
-# loop as it goes.
-_CLASSIFY_PROGRESS = {
+# --------------------------------------------------------------------------- #
+# Cross-worker progress state for the three long-running stage loops
+# (classify/detect/extract), persisted to a small JSON file under the active
+# project's output dir rather than a plain in-memory module-level dict.
+#
+# Gunicorn (see the deploy systemd unit's --workers flag) runs multiple
+# worker PROCESSES, each with its own separate Python memory — a dict
+# written to by the worker running a several-minute classify/detect/extract
+# loop is invisible to whichever OTHER worker happens to answer a /progress
+# poll or a /pause click. A sync worker can only handle one request at a
+# time, so while the loop's worker is busy, literally every other request
+# (including every progress poll) gets served by a different worker whose
+# copy of that dict was never touched — the progress bar silently freezes at
+# whatever that other worker's dict happened to hold, and a /pause click can
+# silently no-op the same way. A small file under OUTPUT_DIR is on the same
+# filesystem for every worker, so it's a shared source of truth regardless of
+# which process answers which request. Writing it once per chunk is cheap —
+# each chunk already costs a full LLM round-trip, dwarfing one small write.
+# --------------------------------------------------------------------------- #
+_CLASSIFY_PROGRESS_DEFAULT = {
     "running": False,
     "paused": False,      # set by /pause; the loop blocks between chunks while true
     "paper_id": None,
@@ -751,31 +764,7 @@ _CLASSIFY_PROGRESS = {
     "classified": 0,      # chunks successfully classified so far
     "error": None,
 }
-
-
-@app.route("/api/cheap-ai/classify/progress", methods=["GET"])
-def cheap_ai_classify_progress():
-    return jsonify(_CLASSIFY_PROGRESS)
-
-
-@app.route("/api/cheap-ai/classify/pause", methods=["POST"])
-def cheap_ai_classify_pause():
-    if not _CLASSIFY_PROGRESS["running"]:
-        return jsonify({"error": "no classification run is currently in progress"}), 400
-    _CLASSIFY_PROGRESS["paused"] = True
-    return jsonify(_CLASSIFY_PROGRESS)
-
-
-@app.route("/api/cheap-ai/classify/resume", methods=["POST"])
-def cheap_ai_classify_resume():
-    _CLASSIFY_PROGRESS["paused"] = False
-    return jsonify(_CLASSIFY_PROGRESS)
-
-
-# Same purpose as _CLASSIFY_PROGRESS above, for Stage 3 (detection) instead of
-# Stage 2 (classification) — kept as a separate dict since the two stages can
-# in principle run independently and shouldn't clobber each other's progress.
-_DETECT_PROGRESS = {
+_DETECT_PROGRESS_DEFAULT = {
     "running": False,
     "paper_id": None,
     "chunk_index": 0,
@@ -783,17 +772,7 @@ _DETECT_PROGRESS = {
     "screened": 0,
     "error": None,
 }
-
-
-@app.route("/api/detection-ai/detect/progress", methods=["GET"])
-def detection_ai_detect_progress():
-    return jsonify(_DETECT_PROGRESS)
-
-
-# Same purpose as _CLASSIFY_PROGRESS/_DETECT_PROGRESS, for Stage 4 (extraction,
-# the main/expensive model) — a separate dict since all three stages can in
-# principle run independently.
-_EXTRACT_PROGRESS = {
+_EXTRACT_PROGRESS_DEFAULT = {
     "running": False,
     "paper_id": None,
     "chunk_index": 0,
@@ -804,9 +783,49 @@ _EXTRACT_PROGRESS = {
 }
 
 
+def _progress_path(stage: str) -> Path:
+    return OUTPUT_DIR / f"_progress_{stage}.json"
+
+
+def _read_progress(stage: str, default: dict) -> dict:
+    return _load_json(_progress_path(stage), dict(default))
+
+
+def _write_progress(stage: str, data: dict) -> None:
+    _progress_path(stage).write_text(json.dumps(data))
+
+
+@app.route("/api/cheap-ai/classify/progress", methods=["GET"])
+def cheap_ai_classify_progress():
+    return jsonify(_read_progress("classify", _CLASSIFY_PROGRESS_DEFAULT))
+
+
+@app.route("/api/cheap-ai/classify/pause", methods=["POST"])
+def cheap_ai_classify_pause():
+    progress = _read_progress("classify", _CLASSIFY_PROGRESS_DEFAULT)
+    if not progress["running"]:
+        return jsonify({"error": "no classification run is currently in progress"}), 400
+    progress["paused"] = True
+    _write_progress("classify", progress)
+    return jsonify(progress)
+
+
+@app.route("/api/cheap-ai/classify/resume", methods=["POST"])
+def cheap_ai_classify_resume():
+    progress = _read_progress("classify", _CLASSIFY_PROGRESS_DEFAULT)
+    progress["paused"] = False
+    _write_progress("classify", progress)
+    return jsonify(progress)
+
+
+@app.route("/api/detection-ai/detect/progress", methods=["GET"])
+def detection_ai_detect_progress():
+    return jsonify(_read_progress("detect", _DETECT_PROGRESS_DEFAULT))
+
+
 @app.route("/api/main-ai/extract/progress", methods=["GET"])
 def main_ai_extract_progress():
-    return jsonify(_EXTRACT_PROGRESS)
+    return jsonify(_read_progress("extract", _EXTRACT_PROGRESS_DEFAULT))
 
 
 @app.route("/api/cheap-ai/papers", methods=["GET"])
@@ -902,34 +921,46 @@ def cheap_ai_classify():
 
     # Each chunk is a separate blocking API call, so a full run over hundreds
     # of chunks can take minutes. Save to disk every few chunks (not just at
-    # the end) so /api/cheap-ai/papers reflects live progress, and keep
-    # _CLASSIFY_PROGRESS updated chunk-by-chunk so the page can show a live
-    # progress bar with the paper currently being worked on, rather than
-    # looking stuck for the whole request.
+    # the end) so /api/cheap-ai/papers reflects live progress, and keep the
+    # shared "classify" progress file updated chunk-by-chunk (see
+    # _write_progress above) so the page can show a live progress bar with
+    # the paper currently being worked on, rather than looking stuck for the
+    # whole request.
     SAVE_EVERY = 5
     classified = 0
     total = len(classifiable)
-    _CLASSIFY_PROGRESS.update(
+    progress = dict(_CLASSIFY_PROGRESS_DEFAULT)
+    progress.update(
         running=True, paused=False, paper_id=classifiable[0]["paper_id"] if classifiable else None,
         chunk_index=0, total=total, classified=0, error=None,
     )
+    _write_progress("classify", progress)
     try:
         for i, c in enumerate(classifiable):
             # Block between chunks while paused, rather than mid-API-call —
-            # a paused run always stops at a clean chunk boundary. Save
+            # a paused run always stops at a clean chunk boundary. Re-read
+            # the shared file (not the local `progress` var) for the pause
+            # check, since the /pause click that set it may have been
+            # answered by a different gunicorn worker than this one. Save
             # progress to disk as soon as the pause takes effect so a
             # paused-then-abandoned run doesn't lose anything.
-            if _CLASSIFY_PROGRESS["paused"]:
+            if _read_progress("classify", _CLASSIFY_PROGRESS_DEFAULT).get("paused"):
                 _save_kept_chunks(all_chunks)
-                while _CLASSIFY_PROGRESS["paused"]:
+                progress["paused"] = True
+                _write_progress("classify", progress)
+                while _read_progress("classify", _CLASSIFY_PROGRESS_DEFAULT).get("paused"):
                     time.sleep(0.5)
-            _CLASSIFY_PROGRESS["paper_id"] = c["paper_id"]
-            _CLASSIFY_PROGRESS["chunk_index"] = i + 1
+                progress["paused"] = False
+            progress["paper_id"] = c["paper_id"]
+            progress["chunk_index"] = i + 1
+            _write_progress("classify", progress)
             try:
                 result = llm.classify_chunk(c["text"])
             except Exception as e:
                 _save_kept_chunks(all_chunks)  # keep whatever progress was made
-                _CLASSIFY_PROGRESS["error"] = str(e)
+                progress["error"] = str(e)
+                progress["running"] = False
+                _write_progress("classify", progress)
                 return jsonify({"error": str(e), "classified": classified, "total": total}), 502
             if result:
                 labels = []
@@ -948,9 +979,10 @@ def cheap_ai_classify():
                 c["classification_confidence"] = result.get("confidence")
                 c["keep_classification"] = result.get("keep")
                 classified += 1
-                _CLASSIFY_PROGRESS["classified"] = classified
+                progress["classified"] = classified
             if (i + 1) % SAVE_EVERY == 0:
                 _save_kept_chunks(all_chunks)
+                _write_progress("classify", progress)
 
         _save_kept_chunks(all_chunks)
         # Classification just (re-)ran, so any prior detection verdicts are
@@ -960,7 +992,8 @@ def cheap_ai_classify():
         _discard_detection_results()
         return jsonify({"total": total, "classified": classified})
     finally:
-        _CLASSIFY_PROGRESS["running"] = False
+        progress["running"] = False
+        _write_progress("classify", progress)
 
 
 # --------------------------------------------------------------------------- #
@@ -1083,20 +1116,24 @@ def detection_ai_detect():
 
     # Same reasoning as Cheap AI classification: this can run for minutes
     # over hundreds of chunks, so save to disk every few chunks (not just at
-    # the end) and keep _DETECT_PROGRESS updated chunk-by-chunk so the page
-    # can show a live progress bar with the paper currently being worked on.
+    # the end) and keep the shared "detect" progress file updated
+    # chunk-by-chunk so the page can show a live progress bar with the paper
+    # currently being worked on.
     SAVE_EVERY = 5
     screened = 0
     dropped = 0
     total = len(classifiable)
-    _DETECT_PROGRESS.update(
+    progress = dict(_DETECT_PROGRESS_DEFAULT)
+    progress.update(
         running=True, paper_id=classifiable[0]["paper_id"] if classifiable else None,
         chunk_index=0, total=total, screened=0, error=None,
     )
+    _write_progress("detect", progress)
     try:
         for i, c in enumerate(classifiable):
-            _DETECT_PROGRESS["paper_id"] = c["paper_id"]
-            _DETECT_PROGRESS["chunk_index"] = i + 1
+            progress["paper_id"] = c["paper_id"]
+            progress["chunk_index"] = i + 1
+            _write_progress("detect", progress)
             # Hand Stage 2's own output for this chunk to Stage 3 as context —
             # a high-confidence "regression_table"/"result_text" classification
             # is a strong prior that a point estimate is present, while "other"
@@ -1111,7 +1148,9 @@ def detection_ai_detect():
                 result = llm.detect_estimate(c["text"], targets, classification_context)
             except Exception as e:
                 _save_kept_chunks(all_chunks)  # keep whatever progress was made
-                _DETECT_PROGRESS["error"] = str(e)
+                progress["error"] = str(e)
+                progress["running"] = False
+                _write_progress("detect", progress)
                 return jsonify({"error": str(e), "screened": screened, "total": total}), 502
             if result is not None:
                 detected = result.get("detected")
@@ -1120,13 +1159,14 @@ def detection_ai_detect():
                 c["target_match"] = result.get("target_match")
                 c["keep_reason"] = result.get("keep_reason")
                 screened += 1
-                _DETECT_PROGRESS["screened"] = screened
+                progress["screened"] = screened
                 if detected is False:
                     c["passes_filter"] = False
                     c["filter_reason"] = "cheap_llm_negative"
                     dropped += 1
             if (i + 1) % SAVE_EVERY == 0:
                 _save_kept_chunks(all_chunks)
+                _write_progress("detect", progress)
 
         _save_kept_chunks(all_chunks)
         # Detection just (re-)ran, so any prior extraction records are stale —
@@ -1137,7 +1177,8 @@ def detection_ai_detect():
         # detection_ai_done directly from the 'detected' fields just written.
         return jsonify({"total": total, "screened": screened, "dropped": dropped})
     finally:
-        _DETECT_PROGRESS["running"] = False
+        progress["running"] = False
+        _write_progress("detect", progress)
 
 
 # --------------------------------------------------------------------------- #
@@ -1524,14 +1565,17 @@ def main_ai_extract():
     extracted_chunks = 0
     total = len(extractable)
     records = _load_json(OUTPUT_DIR / "records.json", [])
-    _EXTRACT_PROGRESS.update(
+    progress = dict(_EXTRACT_PROGRESS_DEFAULT)
+    progress.update(
         running=True, paper_id=extractable[0]["paper_id"] if extractable else None,
         chunk_index=0, total=total, extracted=0, records_found=len(records), error=None,
     )
+    _write_progress("extract", progress)
     try:
         for i, c in enumerate(extractable):
-            _EXTRACT_PROGRESS["paper_id"] = c["paper_id"]
-            _EXTRACT_PROGRESS["chunk_index"] = i + 1
+            progress["paper_id"] = c["paper_id"]
+            progress["chunk_index"] = i + 1
+            _write_progress("extract", progress)
             screening = {
                 "labels": c.get("labels") or ([c["chunk_type"]] if c.get("chunk_type") else []),
                 "primary": c.get("chunk_type"),
@@ -1551,7 +1595,9 @@ def main_ai_extract():
             except Exception as e:
                 _save_kept_chunks(all_chunks)
                 (OUTPUT_DIR / "records.json").write_text(json.dumps(records, indent=2))
-                _EXTRACT_PROGRESS["error"] = str(e)
+                progress["error"] = str(e)
+                progress["running"] = False
+                _write_progress("extract", progress)
                 return jsonify({"error": str(e), "extracted": extracted_chunks, "total": total}), 502
 
             # Drop any earlier records sourced from this exact chunk before
@@ -1563,11 +1609,12 @@ def main_ai_extract():
 
             c["extraction_done"] = True
             extracted_chunks += 1
-            _EXTRACT_PROGRESS["extracted"] = extracted_chunks
-            _EXTRACT_PROGRESS["records_found"] = len(records)
+            progress["extracted"] = extracted_chunks
+            progress["records_found"] = len(records)
             if (i + 1) % SAVE_EVERY == 0:
                 _save_kept_chunks(all_chunks)
                 (OUTPUT_DIR / "records.json").write_text(json.dumps(records, indent=2))
+                _write_progress("extract", progress)
 
         # Text and a table chunk from the same paper can each independently
         # yield a record for the same real estimate at different precision
@@ -1584,7 +1631,8 @@ def main_ai_extract():
             "duplicates_removed": deduped_count,
         })
     finally:
-        _EXTRACT_PROGRESS["running"] = False
+        progress["running"] = False
+        _write_progress("extract", progress)
 
 
 # --------------------------------------------------------------------------- #
