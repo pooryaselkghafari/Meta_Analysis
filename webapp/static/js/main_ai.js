@@ -10,6 +10,7 @@ const extractProgress = document.getElementById('extract-progress');
 const extractProgressFill = document.getElementById('extract-progress-fill');
 const extractProgressLabel = document.getElementById('extract-progress-label');
 const addRowBtn = document.getElementById('add-row-btn');
+const dedupeBtn = document.getElementById('dedupe-btn');
 
 let allRecords = [];
 let expandedId = null;
@@ -25,6 +26,10 @@ const EDIT_FIELDS = [
   { key: 'target_elasticity_type', label: 'Elasticity type', type: 'text' },
   { key: 'target_product', label: 'Product', type: 'text' },
   { key: 'target_cross_price_product', label: 'Cross-price product', type: 'text' },
+  // options filled in at load time from /api/food-groups (see loadFoodGroups) —
+  // a fixed 8-value vocab, not something typed per-project like the fields above.
+  { key: 'target_food_group', label: 'Food group', type: 'select', options: [] },
+  { key: 'target_cross_price_food_group', label: 'Cross-price food group', type: 'select', options: [] },
   { key: 'paper_elasticity_wording_raw', label: 'Paper elasticity wording', type: 'text' },
   { key: 'paper_product_wording_raw', label: 'Paper product wording', type: 'text' },
   { key: 'paper_cross_price_product_wording_raw', label: 'Paper cross-price wording', type: 'text' },
@@ -178,6 +183,30 @@ async function saveEdit(estimateId) {
   await loadRecords();
 }
 
+async function dedupeRows() {
+  dedupeBtn.disabled = true;
+  const original = dedupeBtn.textContent;
+  dedupeBtn.textContent = 'Checking…';
+  try {
+    const res = await fetch('/api/main-ai/dedupe', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(data.error || 'Could not check for duplicates.');
+      return;
+    }
+    if (data.removed > 0) {
+      await loadRecords();
+      alert(`Removed ${data.removed} rounded-duplicate record${data.removed === 1 ? '' : 's'}.`);
+    } else {
+      alert('No rounded duplicates found.');
+    }
+  } catch (e) {
+    alert('Could not check for duplicates — check the server log.');
+  }
+  dedupeBtn.textContent = original;
+  dedupeBtn.disabled = false;
+}
+
 async function addRow() {
   addRowBtn.disabled = true;
   try {
@@ -265,7 +294,7 @@ function editRow(r) {
       <input type="text" class="edit-input" data-field="row_label" value="${escapeHtml(editDraft.row_label ?? '')}" placeholder="row" style="width:48%">
       <input type="text" class="edit-input" data-field="column_label" value="${escapeHtml(editDraft.column_label ?? '')}" placeholder="column" style="width:48%">
     </div>`;
-  return `<tr class="record-detail-row editing"><td colspan="16">
+  return `<tr class="record-detail-row editing"><td colspan="17">
       <div class="record-detail-grid">${fieldsHtml}${compositeHtml}</div>
       <div class="record-edit-actions">
         <button class="btn-primary" data-action="save" data-id="${escapeHtml(r.estimate_id)}">Save</button>
@@ -280,6 +309,7 @@ function detailRow(r) {
     ['Paper product wording', r.paper_product_wording_raw],
     ['Paper cross-price product wording', r.paper_cross_price_product_wording_raw],
     ['Match justification', r.target_match_justification],
+    ['Cross-price food group', r.target_cross_price_food_group || '–'],
     ['Elasticity: raw / derived', r.elasticity_is_raw === null || r.elasticity_is_raw === undefined ? '–' : `${r.elasticity_is_raw ? 'raw' : 'derived'} (${r.elasticity_transformation_type || 'unknown'})`],
     ['Elasticity unit', r.elasticity_unit], ['Unit source', r.unit_source],
     ['Confidence interval', r.confidence_interval ? `[${r.confidence_interval[0]}, ${r.confidence_interval[1]}]` : (r.confidence_interval_reported ? '–' : 'not reported')],
@@ -298,7 +328,7 @@ function detailRow(r) {
   const cells = items.map(([label, val]) =>
     `<div class="record-detail-item"><div class="record-detail-label">${escapeHtml(label)}</div><div class="record-detail-value">${escapeHtml(val)}</div></div>`
   ).join('');
-  return `<tr class="record-detail-row"><td colspan="16"><div class="record-detail-grid">${cells}</div></td></tr>`;
+  return `<tr class="record-detail-row"><td colspan="17"><div class="record-detail-grid">${cells}</div></td></tr>`;
 }
 
 function renderTable() {
@@ -328,6 +358,7 @@ function renderTable() {
         <td class="mono">${escapeHtml(r.paper_id)}</td>
         <td>${escapeHtml(r.target_elasticity_type) || '–'}</td>
         <td>${escapeHtml(r.target_product) || '–'}</td>
+        <td>${r.target_food_group ? `<span class="chunk-tag match">${escapeHtml(r.target_food_group)}</span>` : '–'}</td>
         <td>${escapeHtml(r.target_cross_price_product) || '–'}</td>
         <td class="record-wording">${escapeHtml(r.paper_elasticity_wording_raw) || '–'}</td>
         <td class="record-wording">${escapeHtml(r.paper_product_wording_raw) || '–'}</td>
@@ -387,6 +418,7 @@ function renderTable() {
 paperFilter.addEventListener('change', renderTable);
 reviewOnlyFilter.addEventListener('change', renderTable);
 addRowBtn.addEventListener('click', addRow);
+dedupeBtn.addEventListener('click', dedupeRows);
 
 function showProgressBar() {
   extractProgress.hidden = false;
@@ -433,7 +465,8 @@ extractBtn.addEventListener('click', async () => {
       await Promise.all([loadPapers(), loadRecords()]);
       return;
     }
-    extractStatus.textContent = `Extracted ${data.extracted} of ${data.total} chunks — ${data.records} record${data.records === 1 ? '' : 's'} total.`;
+    const dupNote = data.duplicates_removed ? ` (removed ${data.duplicates_removed} rounded duplicate${data.duplicates_removed === 1 ? '' : 's'})` : '';
+    extractStatus.textContent = `Extracted ${data.extracted} of ${data.total} chunks — ${data.records} record${data.records === 1 ? '' : 's'} total${dupNote}.`;
     extractStatus.classList.remove('busy');
     await Promise.all([loadPapers(), loadRecords()]);
   } catch (e) {
@@ -446,5 +479,20 @@ extractBtn.addEventListener('click', async () => {
   extractBtn.disabled = false;
 });
 
+async function loadFoodGroups() {
+  try {
+    const res = await fetch('/api/food-groups');
+    const data = await res.json();
+    const groups = data.food_groups || [];
+    EDIT_FIELDS.forEach(f => {
+      if (f.key === 'target_food_group' || f.key === 'target_cross_price_food_group') f.options = groups;
+    });
+  } catch (e) {
+    // leave options empty if unreachable — the fields still render as a
+    // (currently choice-less) select rather than breaking the edit form
+  }
+}
+
+loadFoodGroups();
 loadPapers();
 loadRecords();

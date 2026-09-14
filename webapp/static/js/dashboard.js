@@ -5,6 +5,7 @@ const dashRegTable = document.getElementById('dash-reg-table');
 const dashFilterBar = document.getElementById('dash-filter-bar');
 
 let targets = { elasticities: [], products: [] };
+let foodGroups = [];
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -143,12 +144,23 @@ async function loadTargets() {
   }
 }
 
+async function loadFoodGroupsList() {
+  try {
+    const res = await fetch('/api/food-groups');
+    foodGroups = (await res.json()).food_groups || [];
+  } catch (e) {
+    foodGroups = [];
+  }
+}
+
 // Lets the user restrict every stat/chart on the page to one or more of the
 // elasticity types / products they originally asked for on the upload page
 // (targets.json) — e.g. only "Income elasticity", or only "Maize" — same
-// checkbox-from-targets-list pattern as the Regression page's filters.
+// checkbox-from-targets-list pattern as the Regression page's filters. Food
+// group is a fixed 8-value vocab (not project-specific), so it's always
+// offered once loaded, independent of whether targets.json has anything in it.
 function renderFilterBar() {
-  if (!targets.elasticities.length && !targets.products.length) {
+  if (!targets.elasticities.length && !targets.products.length && !foodGroups.length) {
     dashFilterBar.innerHTML = '';
     return;
   }
@@ -167,6 +179,7 @@ function renderFilterBar() {
   dashFilterBar.innerHTML = `
     ${group('Elasticity type', 'elasticity_type', targets.elasticities)}
     ${group('Product', 'product', targets.products)}
+    ${group('Food group', 'food_group', foodGroups)}
     <button class="btn-secondary dash-filter-clear" id="dash-filter-clear" hidden>Clear filters</button>`;
 
   dashFilterBar.querySelectorAll('.dash-filter-checkbox').forEach(cb => {
@@ -219,6 +232,7 @@ async function loadDashboard() {
 
   dashCoverage.innerHTML = [
     coverageBlock('Products', d.products, d.records_total),
+    coverageBlock('Food groups (standard 8-way)', d.food_groups, d.records_total),
     coverageBlock('Elasticity types', d.elasticity_types, d.records_total),
     coverageBlock('Country / region', d.countries, d.records_total),
     coverageBlock('Data source', d.data_sources, d.records_total),
@@ -235,6 +249,7 @@ async function loadDashboard() {
 
 (async function init() {
   await loadTargets();
+  await loadFoodGroupsList();
   renderFilterBar();
   await loadDashboard();
 })();

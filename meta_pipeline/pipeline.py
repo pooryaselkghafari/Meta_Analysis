@@ -235,7 +235,68 @@ class Pipeline:
                 rec = self._record_from_raw(raw, c, idx)
                 self._backfill_paper_metadata(rec, paper_metadata.get(c.paper_id))
                 records.append(rec)
-        return records
+        return self._dedupe_rounded_records(records)
+
+    @staticmethod
+    def _decimal_places(v: float) -> int:
+        s = f"{v:.10f}".rstrip("0")
+        return len(s.split(".")[1]) if "." in s else 0
+
+    @classmethod
+    def _is_rounded_duplicate(cls, rounded, raw) -> bool:
+        if not isinstance(rounded, (int, float)) or not isinstance(raw, (int, float)):
+            return False
+        d_rounded, d_raw = cls._decimal_places(rounded), cls._decimal_places(raw)
+        if d_rounded >= d_raw:
+            return False
+        return abs(round(raw, d_rounded) - rounded) < 1e-9
+
+    @classmethod
+    def _dedupe_rounded_records(cls, records: List[ExtractionRecord]) -> List[ExtractionRecord]:
+        """Text and a table in the same paper sometimes restate the identical
+        elasticity twice at different precision (prose "-0.35" vs. the
+        underlying table's "-0.353") — since each is a separate chunk/excerpt,
+        extraction can independently emit a record for each. When two records
+        agree on everything that identifies a distinct estimate (paper,
+        elasticity type, product, cross-price product, variable role,
+        estimate type) and one's coefficient is just a rounding of the
+        other's, keep only the more precise (raw) one. Mirrors the webapp's
+        _dedupe_rounded_records in webapp/app.py for the same reasoning;
+        records here have no manual-edit flag to protect since this path
+        (CLI, not the dashboard) never has human-edited records to begin with."""
+        def identity_key(r: ExtractionRecord):
+            return (
+                r.paper_id, r.target_elasticity_type, r.target_product,
+                r.target_cross_price_product, r.variable_role, r.estimate_type,
+            )
+
+        groups: Dict[tuple, List[ExtractionRecord]] = {}
+        for r in records:
+            groups.setdefault(identity_key(r), []).append(r)
+
+        dropped_ids = set()
+        for group in groups.values():
+            if len(group) < 2:
+                continue
+            survivors = list(group)
+            i = 0
+            while i < len(survivors):
+                a = survivors[i]
+                dropped_this_round = False
+                for j, b in enumerate(survivors):
+                    if i == j:
+                        continue
+                    if cls._is_rounded_duplicate(a.coefficient, b.coefficient):
+                        dropped_ids.add(a.estimate_id)
+                        survivors.pop(i)
+                        dropped_this_round = True
+                        break
+                if not dropped_this_round:
+                    i += 1
+
+        if not dropped_ids:
+            return records
+        return [r for r in records if r.estimate_id not in dropped_ids]
 
     # Stage 5 — validation (LLM + deterministic consistency check)
     def validate(self, records: List[ExtractionRecord],

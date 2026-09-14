@@ -16,6 +16,24 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 from . import prompts_store
+from .models import FoodGroup
+
+# The standard 8-group food classification (see FoodGroup's docstring) —
+# included in both the detection and extraction prompts (via
+# _format_targets_for_prompt) so a paper reporting at this aggregate level
+# is recognized as relevant even when it doesn't match any of the user's own
+# specific target products. Descriptions carry the common example items so a
+# model unfamiliar with this exact taxonomy can classify confidently.
+FOOD_GROUP_DESCRIPTIONS = {
+    FoodGroup.BREAD_AND_CEREALS: "bread, cereals, rice, maize, wheat, other grains",
+    FoodGroup.MEAT: "beef, pork, poultry, other meats",
+    FoodGroup.FISH_AND_SEAFOOD: "fish, shellfish, other seafood",
+    FoodGroup.DAIRY_PRODUCTS: "milk, cheese, butter, other dairy",
+    FoodGroup.FATS_AND_OILS: "cooking/edible oils, margarine, other fats",
+    FoodGroup.FRUIT_AND_VEGETABLES: "fruit, vegetables, and combined \"FV\"/produce lines",
+    FoodGroup.BEVERAGES_AND_TOBACCO: "coffee, tea, soft drinks, alcohol, tobacco",
+    FoodGroup.OTHER_FOOD_PRODUCTS: "condiments, sugars, and other miscellaneous food items",
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -53,7 +71,16 @@ def _format_targets_for_prompt(targets: dict) -> str:
     lines = [
         f"Elasticity type(s) to extract: {', '.join(elasticities) if elasticities else '(none specified)'}",
         f"Product(s) of interest: {', '.join(products) if products else '(none specified)'}",
-    ]
+        "",
+        "Standard food group reference (independent of the product list above): "
+        "papers vary widely in how granular their product categories are — some "
+        "split fruits from vegetables, others report one combined \"fruits and "
+        "vegetables\"/\"FV\" line; the same happens with meats (beef/pork/poultry "
+        "vs. one combined \"meat\" line) and grains/cereals. A chunk reporting at "
+        "one of these standard aggregate levels is still relevant/extractable even "
+        "when it doesn't literally match any product listed above — the 8 "
+        "standard groups are:",
+    ] + [f"  - {g.value}: {desc}" for g, desc in FOOD_GROUP_DESCRIPTIONS.items()]
     return "\n".join(lines)
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 from pathlib import Path
 from typing import List, Optional
 
@@ -31,6 +32,33 @@ def _marker_available() -> bool:
         return False
 
 
+# create_model_dict() loads Marker's layout/OCR/table/reading-order model
+# weights (multiple GB, real disk I/O + inference-engine warmup) — this is
+# the expensive part of using Marker at all. It used to be called fresh
+# inside _parse_with_marker on every single PDF, so every paper parsed paid
+# the full load cost again and multiplied peak RAM use across a run. Cached
+# here instead: loaded once per process (first call only) and reused for
+# every subsequent parse. The PdfConverter itself is cheap to construct per
+# call, so only the underlying weights need to be shared.
+#
+# Guarded with a lock (double-checked) rather than a plain "if None" check
+# because the webapp runs Flask with threaded=True — two concurrent upload
+# requests could otherwise race into loading the model weights twice at
+# once, which is exactly the peak-RAM spike this cache is meant to avoid.
+_MARKER_MODEL_DICT = None
+_MARKER_MODEL_LOCK = threading.Lock()
+
+
+def _get_marker_model_dict():
+    global _MARKER_MODEL_DICT
+    if _MARKER_MODEL_DICT is None:
+        with _MARKER_MODEL_LOCK:
+            if _MARKER_MODEL_DICT is None:  # re-check: another thread may have just finished loading
+                from marker.models import create_model_dict
+                _MARKER_MODEL_DICT = create_model_dict()
+    return _MARKER_MODEL_DICT
+
+
 def _parse_with_marker(pdf_path: str, cfg: MarkerConfig) -> str:
     """Convert a single PDF to markdown using Marker's Python API.
 
@@ -39,11 +67,10 @@ def _parse_with_marker(pdf_path: str, cfg: MarkerConfig) -> str:
     pipeline.
     """
     from marker.converters.pdf import PdfConverter
-    from marker.models import create_model_dict
     from marker.output import text_from_rendered
 
     converter = PdfConverter(
-        artifact_dict=create_model_dict(),
+        artifact_dict=_get_marker_model_dict(),
         config={"force_ocr": cfg.force_ocr, "output_format": cfg.output_format},
     )
     rendered = converter(pdf_path)

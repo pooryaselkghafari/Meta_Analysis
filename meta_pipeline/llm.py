@@ -451,6 +451,15 @@ class LLMClient:
     )
     _SOURCE_TYPES = ("table", "text", "figure")
     _TEST_STAT_TYPES = ("t", "z", "chi2", "f", "other")
+    # Standard 8-group food classification (mirrors models.FoodGroup exactly)
+    # — kept Title Case here, unlike the other enums above, since these are
+    # meant as human-readable display values (table columns, regression/
+    # dashboard labels), not internal machine tokens.
+    _FOOD_GROUPS = (
+        "Bread and cereals", "Meat", "Fish and seafood", "Dairy products",
+        "Fats and oils", "Fruit and vegetables", "Beverages and tobacco",
+        "Other food products",
+    )
 
     @classmethod
     def _clean_enum(cls, value: Any, allowed: tuple) -> Optional[str]:
@@ -458,6 +467,20 @@ class LLMClient:
             return None
         v = value.strip().lower()
         return v if v in allowed else None
+
+    @classmethod
+    def _clean_food_group(cls, value: Any) -> Optional[str]:
+        """Case-insensitive match against _FOOD_GROUPS, normalized back to the
+        canonical Title Case string — tolerates a model that ignores the
+        exact-casing instruction (e.g. returns "bread and cereals") without
+        silently losing a genuine classification over casing alone."""
+        if not isinstance(value, str):
+            return None
+        v = value.strip().lower()
+        for canonical in cls._FOOD_GROUPS:
+            if canonical.lower() == v:
+                return canonical
+        return None
 
     @classmethod
     def _parse_one_estimate(cls, raw: Any) -> Optional[Dict[str, Any]]:
@@ -478,6 +501,8 @@ class LLMClient:
         out["variable_role"] = cls._clean_enum(raw.get("variable_role"), cls._VARIABLE_ROLES)
         out["estimate_type"] = cls._clean_enum(raw.get("estimate_type"), cls._ESTIMATE_TYPES)
         out["source_type"] = cls._clean_enum(raw.get("source_type"), cls._SOURCE_TYPES)
+        out["target_food_group"] = cls._clean_food_group(raw.get("target_food_group"))
+        out["target_cross_price_food_group"] = cls._clean_food_group(raw.get("target_cross_price_food_group"))
 
         # test_statistic: {"type": "t"/"z"/"chi2"/"f"/"other", "value": float}
         # — only kept if it has a usable numeric value; an unrecognized type

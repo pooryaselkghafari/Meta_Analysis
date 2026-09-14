@@ -468,6 +468,15 @@ def save_targets():
     return jsonify({"elasticities": elasticities, "products": products})
 
 
+@app.route("/api/food-groups", methods=["GET"])
+def get_food_groups():
+    """The fixed standard 8-group food classification (see FoodGroup in
+    meta_pipeline/models.py) — unlike elasticities/products, this isn't
+    user-editable per project, just a reference vocab the Dashboard's filter
+    bar and the Main AI edit form need."""
+    return jsonify({"food_groups": list(LLMClient._FOOD_GROUPS)})
+
+
 # --------------------------------------------------------------------------- #
 # Analysis (deterministic stages only, for now)
 # --------------------------------------------------------------------------- #
@@ -1174,6 +1183,8 @@ _RECORD_ENUM_FIELDS = {
     "unit_source": LLMClient._UNIT_SOURCES,
     "source_type": LLMClient._SOURCE_TYPES,
     "elasticity_transformation_type": LLMClient._TRANSFORMATION_TYPES,
+    "target_food_group": LLMClient._FOOD_GROUPS,
+    "target_cross_price_food_group": LLMClient._FOOD_GROUPS,
 }
 _RECORD_NUMERIC_FIELDS = {"coefficient", "standard_error", "p_value", "n_obs", "n_units"}
 _RECORD_INT_FIELDS = {"n_obs", "n_units"}
@@ -1199,6 +1210,7 @@ def _blank_record(paper_id: str) -> dict:
         "estimate_id": f"manual::{uuid.uuid4().hex[:10]}",
         "source_chunk_id": None,
         "target_elasticity_type": None, "target_product": None, "target_cross_price_product": None,
+        "target_food_group": None, "target_cross_price_food_group": None,
         "paper_elasticity_wording_raw": None, "paper_product_wording_raw": None,
         "paper_cross_price_product_wording_raw": None,
         "match_type": None, "target_match_justification": None,
@@ -1383,6 +1395,90 @@ def _record_from_estimate(raw: dict, chunk: dict, idx: int, meta: dict) -> dict:
     return rec
 
 
+def _decimal_places(v: float) -> int:
+    s = f"{v:.10f}".rstrip("0")
+    return len(s.split(".")[1]) if "." in s else 0
+
+
+def _is_rounded_duplicate(rounded: Optional[float], raw: Optional[float]) -> bool:
+    """True if `rounded` looks like `raw` restated at lower precision — e.g.
+    rounded=-0.35, raw=-0.353. Requires `rounded` to actually carry fewer
+    decimal places than `raw` (otherwise two independently-reported values
+    that coincidentally match to N places would be flagged as duplicates)."""
+    if not isinstance(rounded, (int, float)) or not isinstance(raw, (int, float)):
+        return False
+    d_rounded, d_raw = _decimal_places(rounded), _decimal_places(raw)
+    if d_rounded >= d_raw:
+        return False
+    return abs(round(raw, d_rounded) - rounded) < 1e-9
+
+
+def _dedupe_rounded_records(records: list) -> "tuple[list, int]":
+    """Text and a table in the same paper sometimes restate the identical
+    elasticity twice at different precision — e.g. prose says "-0.35" while
+    the underlying table says "-0.353". Since chunking sends the prose and
+    the table to extraction as separate excerpts, each can independently
+    yield its own record for what is really a single estimate (the
+    extraction prompt already prevents this *within* one excerpt, but can't
+    see across chunks). When two records agree on everything that identifies
+    a distinct estimate (paper, elasticity type, product, cross-price
+    product, variable role, estimate type) and one's coefficient is just a
+    rounding of the other's, keep only the more precise (raw) one.
+
+    Records a human has touched (manually_edited/manually_added) are never
+    auto-dropped — only genuinely machine-extracted duplicates are cleaned
+    up automatically. Returns (deduped_records, number_removed)."""
+    def identity_key(r):
+        return (
+            r.get("paper_id"), r.get("target_elasticity_type"), r.get("target_product"),
+            r.get("target_cross_price_product"), r.get("variable_role"), r.get("estimate_type"),
+        )
+
+    groups: Dict[tuple, list] = {}
+    for r in records:
+        groups.setdefault(identity_key(r), []).append(r)
+
+    dropped_ids = set()
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        survivors = list(group)
+        i = 0
+        while i < len(survivors):
+            a = survivors[i]
+            if a.get("manually_edited") or a.get("manually_added"):
+                i += 1
+                continue
+            dropped_this_round = False
+            for j, b in enumerate(survivors):
+                if i == j or b.get("manually_edited") or b.get("manually_added"):
+                    continue
+                if _is_rounded_duplicate(a.get("coefficient"), b.get("coefficient")):
+                    dropped_ids.add(a["estimate_id"])
+                    survivors.pop(i)
+                    dropped_this_round = True
+                    break
+            if not dropped_this_round:
+                i += 1
+
+    if not dropped_ids:
+        return records, 0
+    return [r for r in records if r.get("estimate_id") not in dropped_ids], len(dropped_ids)
+
+
+@app.route("/api/main-ai/dedupe", methods=["POST"])
+def main_ai_dedupe():
+    """Standalone cleanup for records already sitting in records.json — runs
+    the same rounded-duplicate check the extraction endpoint applies
+    automatically, without calling the LLM again. Useful right after this
+    fix ships, for data extracted before it existed."""
+    records = _load_json(OUTPUT_DIR / "records.json", [])
+    deduped, removed = _dedupe_rounded_records(records)
+    if removed:
+        (OUTPUT_DIR / "records.json").write_text(json.dumps(deduped, indent=2))
+    return jsonify({"removed": removed, "records": len(deduped)})
+
+
 @app.route("/api/main-ai/extract", methods=["POST"])
 def main_ai_extract():
     """Run Stage 4 extraction (the main/expensive AI) over every chunk Stage 3
@@ -1473,11 +1569,20 @@ def main_ai_extract():
                 _save_kept_chunks(all_chunks)
                 (OUTPUT_DIR / "records.json").write_text(json.dumps(records, indent=2))
 
+        # Text and a table chunk from the same paper can each independently
+        # yield a record for the same real estimate at different precision
+        # (see _dedupe_rounded_records) — clean that up across the whole
+        # merged set now that every chunk has been processed, not per-chunk.
+        records, deduped_count = _dedupe_rounded_records(records)
+
         _save_kept_chunks(all_chunks)
         (OUTPUT_DIR / "records.json").write_text(json.dumps(records, indent=2))
         # No explicit "mark done" needed — _load_state() recomputes
         # main_ai_done directly from the 'extraction_done' fields just written.
-        return jsonify({"total": total, "extracted": extracted_chunks, "records": len(records)})
+        return jsonify({
+            "total": total, "extracted": extracted_chunks, "records": len(records),
+            "duplicates_removed": deduped_count,
+        })
     finally:
         _EXTRACT_PROGRESS["running"] = False
 
@@ -1617,10 +1722,12 @@ def dashboard_summary():
 
     elasticity_filter = set(_multi_query_param("elasticity_type"))
     product_filter = set(_multi_query_param("product"))
+    food_group_filter = set(_multi_query_param("food_group"))
     records = [
         r for r in all_records
         if (not elasticity_filter or r.get("target_elasticity_type") in elasticity_filter)
         and (not product_filter or r.get("target_product") in product_filter)
+        and (not food_group_filter or r.get("target_food_group") in food_group_filter)
     ]
 
     papers_total = len(list(INPUT_DIR.glob("*.pdf")))
@@ -1638,6 +1745,7 @@ def dashboard_summary():
         "records_requires_review": sum(1 for r in records if r.get("requires_review")),
         "records_manually_edited": sum(1 for r in records if r.get("manually_edited")),
         "products": _top_counts(records, "target_product"),
+        "food_groups": _top_counts(records, "target_food_group"),
         "elasticity_types": _top_counts(records, "target_elasticity_type"),
         "countries": _top_counts(records, "countries_region"),
         "data_sources": _top_counts(records, "data_source"),
@@ -1688,4 +1796,9 @@ if __name__ == "__main__":
     # whole run (one request per chunk to the LLM), so pause/resume/progress
     # requests need to be served concurrently on a separate thread rather
     # than queuing behind it.
-    app.run(debug=True, port=5050, threaded=True)
+    # host="0.0.0.0" is required for any non-local deployment (a droplet, a
+    # VM, a container) — Flask's default host is 127.0.0.1, which only
+    # accepts connections from inside the machine itself. Left unset, the
+    # app runs fine over SSH-local testing but is completely unreachable
+    # from a browser hitting the server's public IP.
+    app.run(host="0.0.0.0", debug=True, port=5050, threaded=True)

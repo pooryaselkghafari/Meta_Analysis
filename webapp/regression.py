@@ -20,6 +20,15 @@ import pandas as pd
 # the regression formula. "derived" fields are computed from raw record
 # fields (e.g. abs_coefficient from coefficient) rather than being a literal
 # key already present on the record dict — see _row_from_record.
+# Standard 8-group food classification (mirrors meta_pipeline.llm.LLMClient
+# ._FOOD_GROUPS / models.FoodGroup exactly) — duplicated here as a small,
+# stable constant rather than importing meta_pipeline.llm, which would pull
+# in the anthropic/openai/google SDKs just for an 8-item tuple.
+FOOD_GROUPS = (
+    "Bread and cereals", "Meat", "Fish and seafood", "Dairy products",
+    "Fats and oils", "Fruit and vegetables", "Beverages and tobacco",
+    "Other food products",
+)
 FIELDS: Dict[str, Dict[str, Any]] = {
     "coefficient":                 {"label": "Coefficient (elasticity value)", "kind": "numeric"},
     "abs_coefficient":             {"label": "|Coefficient| (magnitude)", "kind": "numeric", "derived": True},
@@ -32,6 +41,8 @@ FIELDS: Dict[str, Dict[str, Any]] = {
     "target_elasticity_type":      {"label": "Elasticity type", "kind": "categorical"},
     "target_product":              {"label": "Product", "kind": "categorical"},
     "target_cross_price_product":  {"label": "Cross-price product", "kind": "categorical"},
+    "target_food_group":           {"label": "Food group", "kind": "categorical", "options": list(FOOD_GROUPS)},
+    "target_cross_price_food_group": {"label": "Cross-price food group", "kind": "categorical", "options": list(FOOD_GROUPS)},
     "match_type":                  {"label": "Match type", "kind": "categorical"},
     "variable_role":               {"label": "Variable role", "kind": "categorical"},
     "estimate_type":                {"label": "Estimate type", "kind": "categorical"},
@@ -97,6 +108,7 @@ def _row_from_record(r: dict) -> dict:
         row["time_period_span"] = None
 
     for f in ("target_elasticity_type", "target_product", "target_cross_price_product",
+              "target_food_group", "target_cross_price_food_group",
               "match_type", "variable_role", "estimate_type", "specification_status",
               "unit_source", "source_type", "model_type", "countries_region",
               "frequency", "data_source", "paper_id"):

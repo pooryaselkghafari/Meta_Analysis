@@ -28,7 +28,7 @@ function escapeHtml(s) {
 // has to exactly match. The rest don't come from a user-defined list, so
 // they stay free text.
 const FILTERABLE = [
-  'target_product', 'target_elasticity_type', 'model_type',
+  'target_product', 'target_food_group', 'target_elasticity_type', 'model_type',
   'countries_region', 'specification_status', 'source_type',
 ];
 const TARGET_LIST_FIELDS = { target_elasticity_type: 'elasticities', target_product: 'products' };
@@ -76,8 +76,14 @@ async function loadFieldCatalog() {
   syncIvAvailability();
 
   filterGroups.innerHTML = FILTERABLE.filter(k => fields[k]).map(k => {
+    // A fixed vocab from the field catalog itself (e.g. target_food_group's
+    // 8 standard groups) takes priority over a project-defined targets.json
+    // list — both render as checkboxes the same way, just from a different
+    // source of truth.
     const targetKey = TARGET_LIST_FIELDS[k];
-    const targetList = targetKey ? (targets[targetKey] || []) : [];
+    const targetList = (fields[k].options && fields[k].options.length)
+      ? fields[k].options
+      : (targetKey ? (targets[targetKey] || []) : []);
     if (targetList.length) {
       return `
         <div class="iv-group">

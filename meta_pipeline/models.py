@@ -102,6 +102,29 @@ class SourceType(str, Enum):
     FIGURE = "figure"
 
 
+class FoodGroup(str, Enum):
+    """The standard 8-group food classification used in international demand-
+    system comparisons (e.g. the International Food Consumption Patterns
+    project) — see https://www.ers.usda.gov/data-products/commodity-and-food-elasticities/documentation.
+    Exists because papers report products at wildly different granularities
+    (some split "fruits" from "vegetables"; others report one combined "FV"
+    line; meats/grains have the same issue) and a user's own target product
+    list rarely matches any one paper's exact wording or aggregation level.
+    Normalizing every record onto this fixed 8-way axis, independent of both
+    the paper's own wording and the user's specific product list, is what
+    makes cross-paper comparison and regression possible despite that.
+    Populated by the extraction stage from general knowledge of what each
+    product is, not from a per-project mapping the user has to maintain."""
+    BREAD_AND_CEREALS = "Bread and cereals"
+    MEAT = "Meat"
+    FISH_AND_SEAFOOD = "Fish and seafood"
+    DAIRY_PRODUCTS = "Dairy products"
+    FATS_AND_OILS = "Fats and oils"
+    FRUIT_AND_VEGETABLES = "Fruit and vegetables"
+    BEVERAGES_AND_TOBACCO = "Beverages and tobacco"
+    OTHER_FOOD_PRODUCTS = "Other food products"
+
+
 # --------------------------------------------------------------------------- #
 # Structural / intermediate models (produced by the deterministic stages)
 # --------------------------------------------------------------------------- #
@@ -255,6 +278,16 @@ class ExtractionRecord:
     paper_elasticity_wording_raw: Optional[str] = None
     paper_product_wording_raw: Optional[str] = None
     paper_cross_price_product_wording_raw: Optional[str] = None
+    # Standard 8-group food classification (see FoodGroup) — always populated
+    # when the product is a food item, independent of whether target_product
+    # itself resolved to one of the user's specific target products. This is
+    # what lets an estimate survive and stay comparable even when the paper
+    # reports at a different aggregation level than the user's own target
+    # list (e.g. paper says "fruits and vegetables" combined; user's targets
+    # have "Fruits" and "Vegetables" separately, or neither) — in that case
+    # target_product is left null but target_food_group is still set.
+    target_food_group: Optional[FoodGroup] = None
+    target_cross_price_food_group: Optional[FoodGroup] = None
     match_type: Optional[MatchType] = None
     target_match_justification: Optional[str] = None
     # Replaces the earlier boolean is_main_independent_variable — see
