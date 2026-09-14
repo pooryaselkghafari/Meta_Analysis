@@ -91,9 +91,16 @@ function renderManuscript(paperId, chunks) {
 
   const chunkHtml = chunks.map(c => {
     const labelList = (c.labels && c.labels.length) ? c.labels : (c.chunk_type ? [c.chunk_type] : []);
+    // A chunk the model answered for but that didn't parse is distinct from
+    // one that just hasn't been reached yet — same underlying "no
+    // chunk_type" state, but the cause (and the fix: usually just re-running
+    // Update classification) is different, so it gets its own visible tag
+    // rather than looking identical to "not classified yet".
     const tagsHtml = labelList.length
       ? labelList.map(l => `<span class="chunk-tag type-${l}">${TYPE_LABELS[l] || l}</span>`).join('')
-      : '<span class="chunk-tag type-none">not classified yet</span>';
+      : (c.classification_parse_failed
+          ? '<span class="chunk-tag parse-failed">model response didn’t parse — retry</span>'
+          : '<span class="chunk-tag type-none">not classified yet</span>');
     const confHtml = c.classification_confidence
       ? `<span class="chunk-tag confidence">conf: ${c.classification_confidence}</span>`
       : '';
@@ -238,7 +245,9 @@ classifyBtn.addEventListener('click', async () => {
       await loadPapers();
       return;
     }
-    classifyStatus.textContent = `Classified ${data.classified} of ${data.total} chunks.`;
+    classifyStatus.textContent = data.parse_failed
+      ? `Classified ${data.classified} of ${data.total} chunks — ${data.parse_failed} had a response that didn't parse (flagged below; try "Update classification" again).`
+      : `Classified ${data.classified} of ${data.total} chunks.`;
     classifyStatus.classList.remove('busy');
     await loadPapers();
   } catch (e) {

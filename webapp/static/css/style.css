@@ -670,6 +670,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, .thumb-card:focus-vi
 .chunk-tag.detect-pending { background: var(--line-soft); color: var(--text-dim); }
 .chunk-tag.confidence { background: var(--line-soft); color: var(--text-dim); }
 .chunk-tag.excluded { background: var(--drop-bg); color: var(--drop); }
+.chunk-tag.parse-failed { background: var(--drop-bg); color: var(--drop); }
 .chunk-tag.reason { background: var(--line-soft); color: var(--text-dim); }
 .chunk-tag.match { background: #E6EFF3; color: var(--focus); }
 

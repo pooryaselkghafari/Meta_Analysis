@@ -762,6 +762,7 @@ _CLASSIFY_PROGRESS_DEFAULT = {
     "chunk_index": 0,     # 1-based position of the chunk currently being classified
     "total": 0,           # total chunks across all papers
     "classified": 0,      # chunks successfully classified so far
+    "parse_failed": 0,    # chunks where the model answered but parsing failed
     "error": None,
 }
 _DETECT_PROGRESS_DEFAULT = {
@@ -881,6 +882,7 @@ def cheap_ai_chunk_override(paper_id, chunk_id):
     chunk["labels"] = [chunk_type]
     chunk["classification_confidence"] = "manual"
     chunk["keep_classification"] = chunk_type not in ("other", "literature_review")
+    chunk["classification_parse_failed"] = False
     # this chunk's own downstream verdicts no longer apply to the corrected label
     chunk["detected"] = None
     chunk["detection_confidence"] = None
@@ -928,11 +930,12 @@ def cheap_ai_classify():
     # whole request.
     SAVE_EVERY = 5
     classified = 0
+    parse_failures = 0
     total = len(classifiable)
     progress = dict(_CLASSIFY_PROGRESS_DEFAULT)
     progress.update(
         running=True, paused=False, paper_id=classifiable[0]["paper_id"] if classifiable else None,
-        chunk_index=0, total=total, classified=0, error=None,
+        chunk_index=0, total=total, classified=0, parse_failed=0, error=None,
     )
     _write_progress("classify", progress)
     try:
@@ -978,8 +981,25 @@ def cheap_ai_classify():
                 c["labels"] = labels
                 c["classification_confidence"] = result.get("confidence")
                 c["keep_classification"] = result.get("keep")
+                c["classification_parse_failed"] = False
                 classified += 1
                 progress["classified"] = classified
+            else:
+                # llm.classify_chunk() returns None in exactly two cases: the
+                # prompt is blank, or the model responded but the response
+                # didn't parse into the expected shape. _ai_readiness_error
+                # above already refused to run this whole request if the
+                # prompt were blank, so by the time we're here None can only
+                # mean the second case — the model answered but Stage 2's
+                # parser couldn't use it (malformed/truncated JSON, refusal
+                # text, etc.). That used to be silently indistinguishable
+                # from "never attempted" (chunk_type stays null either way);
+                # flagged explicitly here so the chunk shows up in the UI as
+                # a parse failure to investigate/retry rather than looking
+                # identical to a chunk that just hasn't been reached yet.
+                c["classification_parse_failed"] = True
+                parse_failures += 1
+                progress["parse_failed"] = parse_failures
             if (i + 1) % SAVE_EVERY == 0:
                 _save_kept_chunks(all_chunks)
                 _write_progress("classify", progress)
@@ -990,7 +1010,7 @@ def cheap_ai_classify():
         # False (re-greying Detection AI) until it's re-run against the new
         # classification.
         _discard_detection_results()
-        return jsonify({"total": total, "classified": classified})
+        return jsonify({"total": total, "classified": classified, "parse_failed": parse_failures})
     finally:
         progress["running"] = False
         _write_progress("classify", progress)
