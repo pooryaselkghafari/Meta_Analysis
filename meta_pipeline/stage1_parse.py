@@ -1,9 +1,19 @@
 """Stage 1 — Parse PDFs into markdown and reconstruct split tables.
 
 Primary path: Marker (https://github.com/datalab-to/marker), which converts PDFs
-to markdown while preserving table structure. If Marker isn't installed, an
-optional plaintext fallback keeps the rest of the pipeline runnable during
-development.
+to markdown while preserving table structure by running layout/OCR/table-
+recognition models. Real fidelity, but heavy (PyTorch + several GB of model
+weights) — not something a small shared-CPU server should run.
+
+If Marker isn't installed, the fallback is pdfplumber: it detects tables
+geometrically (character positions and ruling lines — no ML models at all) and
+still renders them as real markdown tables, so Stage 3's table-aware chunker
+still anchors paragraphs-before/table/paragraphs-after around them correctly.
+Meaningfully better than flattening everything to plain prose, at a fraction of
+Marker's resource cost. If pdfplumber itself isn't installed (or errors on a
+particular file), this drops one level further to plain pdfminer/pypdf text
+extraction — no table structure at all, but always available as a last resort
+so a single bad file can't take down the whole run.
 
 Table reconstruction (joining tables split across pages) is stubbed with a clear
 extension point — the heuristic is intentionally left simple until we validate on
@@ -79,7 +89,10 @@ def _parse_with_marker(pdf_path: str, cfg: MarkerConfig) -> str:
 
 
 def _parse_with_fallback(pdf_path: str) -> str:
-    """Plaintext fallback (no table fidelity). Tries pdfminer, then pypdf."""
+    """Last-resort plaintext extraction (no table fidelity at all — tables
+    flatten into unstructured prose). Tries pdfminer, then pypdf. Only reached
+    if pdfplumber isn't installed or itself fails on a given file; normally
+    _parse_with_pdfplumber below handles the no-Marker case."""
     try:
         from pdfminer.high_level import extract_text
         return extract_text(pdf_path)
@@ -91,6 +104,100 @@ def _parse_with_fallback(pdf_path: str) -> str:
         return "\n\n".join((page.extract_text() or "") for page in reader.pages)
     except Exception as e:
         raise RuntimeError(f"No PDF backend available: {e}")
+
+
+# --------------------------------------------------------------------------- #
+# pdfplumber integration — the table-aware fallback used when Marker isn't
+# installed. Unlike Marker, table detection here is purely geometric (cell
+# boundaries inferred from character positions and ruling lines), so there
+# are no model weights to load and nothing for the earlier Marker-caching fix
+# to even apply to: every call is already cheap.
+# --------------------------------------------------------------------------- #
+def _pdfplumber_available() -> bool:
+    try:
+        import pdfplumber  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _table_rows_to_markdown(rows: List[List[Optional[str]]]) -> str:
+    """Render pdfplumber's extracted table cells (list of rows, each a list of
+    cell strings or None) as a markdown pipe table — the exact syntax Stage
+    3's chunker (_TABLE_LINE in stage3_chunk.py, which matches "| a | b |"
+    lines) looks for to anchor surrounding paragraphs to a table, so a
+    pdfplumber-detected table gets the same table-aware chunking treatment as
+    one that came from Marker."""
+    cleaned = [[(c or "").strip().replace("\n", " ") for c in row] for row in rows]
+    cleaned = [r for r in cleaned if any(c for c in r)]  # drop fully-blank rows
+    if not cleaned:
+        return ""
+    header, body = cleaned[0], cleaned[1:]
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---"] * len(header)) + " |",
+    ]
+    lines.extend("| " + " | ".join(r) + " |" for r in body)
+    return "\n".join(lines)
+
+
+def _pdfplumber_page_to_markdown(page) -> str:
+    """One page -> markdown text, with any detected tables rendered as real
+    pipe tables in their correct top-to-bottom position among the surrounding
+    prose — not just appended after the page's text (which would separate a
+    table from the paragraph introducing it) and not duplicated inside the
+    prose (table cell text is cropped out of the prose region first)."""
+    tables = page.find_tables()
+    if not tables:
+        return (page.extract_text() or "").strip()
+
+    tables_sorted = sorted(tables, key=lambda t: t.bbox[1])  # top-to-bottom
+    parts: List[str] = []
+    cursor_top = 0.0
+    for t in tables_sorted:
+        top = max(t.bbox[1], cursor_top)
+        if top > cursor_top:
+            band_text = (page.crop((0, cursor_top, page.width, top)).extract_text() or "").strip()
+            if band_text:
+                parts.append(band_text)
+        md = _table_rows_to_markdown(t.extract())
+        if md:
+            parts.append(md)
+        cursor_top = max(cursor_top, t.bbox[3])
+    if cursor_top < page.height:
+        band_text = (page.crop((0, cursor_top, page.width, page.height)).extract_text() or "").strip()
+        if band_text:
+            parts.append(band_text)
+    return "\n\n".join(parts)
+
+
+def _parse_with_pdfplumber(pdf_path: str) -> str:
+    """Table-aware fallback used when Marker isn't installed. Detects tables
+    geometrically (no ML models, no torch, no GPU — pure character-position
+    heuristics) and renders them as markdown so they get the same
+    table-anchored chunking as Marker's output, instead of flattening into
+    unstructured prose like _parse_with_fallback above. Meaningfully cheaper
+    than Marker at some cost in accuracy on complex/borderless tables — the
+    right trade for a small shared-CPU server."""
+    import pdfplumber
+
+    with pdfplumber.open(pdf_path) as pdf:
+        pages_md = [_pdfplumber_page_to_markdown(page) for page in pdf.pages]
+    return "\n\n".join(p for p in pages_md if p)
+
+
+def _parse_without_marker(pdf_path: str) -> str:
+    """The full non-Marker path: pdfplumber first (table-aware, still cheap),
+    dropping to plain pdfminer/pypdf text if pdfplumber isn't installed or
+    throws on this particular file — table fidelity degrades a level at each
+    step, but something always comes back as long as one backend works, so a
+    single malformed PDF can't take down an entire corpus run."""
+    if _pdfplumber_available():
+        try:
+            return _parse_with_pdfplumber(pdf_path)
+        except Exception:
+            pass
+    return _parse_with_fallback(pdf_path)
 
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +418,7 @@ def parse_paper(pdf_path: str, cfg: Optional[MarkerConfig] = None,
         if _marker_available():
             md = _parse_with_marker(pdf_path, cfg)
         elif cfg.allow_fallback:
-            md = _parse_with_fallback(pdf_path)
+            md = _parse_without_marker(pdf_path)
         else:
             raise RuntimeError("Marker not installed and fallback disabled.")
         md = reconstruct_split_tables(md)

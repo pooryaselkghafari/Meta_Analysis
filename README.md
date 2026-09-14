@@ -8,7 +8,7 @@ the **structure** of the LLM calls; the actual prompts are left blank on purpose
 
 | Part | State |
 |---|---|
-| Stage 1 — PDF parsing (Marker + fallback) | Implemented |
+| Stage 1 — PDF parsing (Marker + pdfplumber/plaintext fallback) | Implemented |
 | Table reconstruction (split tables) | Stub with extension point |
 | Stage 3a — table-aware chunking | Implemented |
 | Stage 3b — heuristic estimate filter | Implemented |
@@ -57,7 +57,7 @@ set `requires_review`.
 ## Run
 
 ```bash
-pip install -r requirements.txt          # fallback parsers + anthropic
+pip install -r requirements.txt          # pdfplumber/pdfminer/pypdf fallback parsers + anthropic
 # For real table fidelity also: pip install marker-pdf
 
 # deterministic only (prompts still blank):
@@ -110,8 +110,12 @@ page tracking isn't populated yet — see the open questions in the design doc.
 
 ## Notes
 
-- Without Marker installed, Stage 1 falls back to plaintext extraction, which loses
-  table structure — tables flatten into prose. Install `marker-pdf` for real runs.
+- Without Marker installed, Stage 1 falls back to `pdfplumber`, which detects tables
+  geometrically (no ML models — much lighter than Marker) and still renders them as
+  markdown tables, so they get the same table-aware chunking. Only if `pdfplumber`
+  itself is unavailable does it drop further to plain pdfminer/pypdf text
+  extraction, which loses table structure entirely. Install `marker-pdf` for the
+  best fidelity if the server can afford the RAM/CPU (or GPU) it needs.
 - Stage ordering follows the design doc: chunking is deterministic and runs before
   the cheap-LLM classification/detection so the expensive calls only see
   pre-filtered, table-aware chunks.

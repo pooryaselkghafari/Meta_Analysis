@@ -7,9 +7,15 @@ anthropic>=0.40.0
 #   pip install google-genai
 
 # Stage 1 — PDF parsing
-# Primary: Marker (heavy; installs torch). Install when ready for real papers:
+# Primary: Marker (heavy; installs torch + several GB of layout/OCR/table
+# model weights — best table fidelity, but needs real RAM and CPU/GPU. Only
+# install this if the server can afford it:
 #   pip install marker-pdf
-# Fallback parsers used if Marker is absent:
+# Fallback (used automatically if Marker isn't installed): pdfplumber detects
+# tables geometrically, no ML models — much lighter than Marker, and clearly
+# better table fidelity than the plain-text pdfminer/pypdf path below, which
+# is now only a last resort if pdfplumber itself is unavailable or errors.
+pdfplumber>=0.11.0
 pdfminer.six>=20221105
 pypdf>=4.0.0
 flask>=3.0.0
