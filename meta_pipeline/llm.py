@@ -30,6 +30,15 @@ class LLMClient:
         # created — each slot can carry its own API key and even its own
         # provider, so they can't safely share a single client instance.
         self._clients: Dict[str, Any] = {}
+        # Last raw model text seen by classify_chunk/detect_estimate, kept
+        # around purely for post-mortem debugging when parsing fails — see
+        # the comment on the max_tokens bump in classify_chunk for why an
+        # empty/truncated response happens in the first place. Callers that
+        # want to know *why* a None came back can read this right after the
+        # call; it's overwritten on every call, so it's only meaningful
+        # immediately after the call that produced it.
+        self.last_classify_raw: Optional[str] = None
+        self.last_detect_raw: Optional[str] = None
 
     # ----- low level: client construction, one branch per provider -----
     def _ensure_client(self, stage: AIModelConfig):
@@ -311,11 +320,29 @@ class LLMClient:
     def classify_chunk(self, chunk_text: str) -> Optional[Dict[str, Any]]:
         """Returns {"labels": [...], "primary": "...", "confidence": float|None,
         "keep": bool} or None if the prompt is blank or nothing parseable came
-        back."""
+        back.
+
+        max_tokens is deliberately generous (not just "enough for the JSON
+        reply") — _call_anthropic/_call_openai/_call_google only return
+        visible "text" content; if the cheap slot is pointed at an
+        effort/thinking-capable model (see effort_levels_for — Sonnet, Opus,
+        Fable, the GPT-5.6 family, Gemini 3.x all qualify, and effort is a
+        real per-slot Settings-page option, not just a code default), some
+        of that budget is spent on invisible reasoning tokens before any
+        visible text is produced. A too-tight cap can be entirely consumed by
+        reasoning with nothing left over for the actual answer, silently
+        returning an empty string — which _parse_classification_result then
+        can't parse (`if not raw: return None`), indistinguishable from a
+        genuine model failure. Reasoning token usage isn't perfectly
+        deterministic even at temperature 0 on real provider APIs, which is
+        why this showed up as an inconsistent, evolving handful of failing
+        chunks across repeated runs rather than the same ones every time.
+        """
         system, user = prompts.classification_prompt(chunk_text)
         if self._prompt_blank(system, user):
             return None
-        out = self._call(self.cfg.cheap, system, user, max_tokens=200)
+        out = self._call(self.cfg.cheap, system, user, max_tokens=1024)
+        self.last_classify_raw = out
         return self._parse_classification_result(out)
 
     # Coarse variable-match hierarchy — "exact"/"semantic"/"conceptual" all
@@ -422,11 +449,18 @@ class LLMClient:
         `classification` is Stage 2's own output for this same chunk (labels,
         primary, confidence, keep) — passed through as extra context so this
         cheap screen doesn't have to re-derive from scratch what Stage 2
-        already figured out about the chunk's content type."""
+        already figured out about the chunk's content type.
+
+        max_tokens is generous for the same reason as classify_chunk above —
+        an effort/thinking-capable model on the cheap slot can burn the
+        whole budget on invisible reasoning tokens before producing any
+        visible text, silently returning an empty string that looks
+        identical to a genuine failure."""
         system, user = prompts.detection_prompt(chunk_text, targets, classification)
         if self._prompt_blank(system, user):
             return None
-        out = self._call(self.cfg.cheap, system, user, max_tokens=200)
+        out = self._call(self.cfg.cheap, system, user, max_tokens=1024)
+        self.last_detect_raw = out
         return self._parse_detection_result(out)
 
     # Final-stage (extraction) vocab. Deliberately a different, coarser

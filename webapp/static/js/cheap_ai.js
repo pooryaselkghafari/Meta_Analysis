@@ -99,7 +99,7 @@ function renderManuscript(paperId, chunks) {
     const tagsHtml = labelList.length
       ? labelList.map(l => `<span class="chunk-tag type-${l}">${TYPE_LABELS[l] || l}</span>`).join('')
       : (c.classification_parse_failed
-          ? '<span class="chunk-tag parse-failed">model response didn’t parse — retry</span>'
+          ? `<span class="chunk-tag parse-failed" title="${escapeHtml(c.classification_parse_error_raw || '')}">model response didn’t parse — retry (hover for raw output)</span>`
           : '<span class="chunk-tag type-none">not classified yet</span>');
     const confHtml = c.classification_confidence
       ? `<span class="chunk-tag confidence">conf: ${c.classification_confidence}</span>`

@@ -883,6 +883,7 @@ def cheap_ai_chunk_override(paper_id, chunk_id):
     chunk["classification_confidence"] = "manual"
     chunk["keep_classification"] = chunk_type not in ("other", "literature_review")
     chunk["classification_parse_failed"] = False
+    chunk["classification_parse_error_raw"] = None
     # this chunk's own downstream verdicts no longer apply to the corrected label
     chunk["detected"] = None
     chunk["detection_confidence"] = None
@@ -982,6 +983,7 @@ def cheap_ai_classify():
                 c["classification_confidence"] = result.get("confidence")
                 c["keep_classification"] = result.get("keep")
                 c["classification_parse_failed"] = False
+                c["classification_parse_error_raw"] = None
                 classified += 1
                 progress["classified"] = classified
             else:
@@ -992,12 +994,17 @@ def cheap_ai_classify():
                 # prompt were blank, so by the time we're here None can only
                 # mean the second case — the model answered but Stage 2's
                 # parser couldn't use it (malformed/truncated JSON, refusal
-                # text, etc.). That used to be silently indistinguishable
-                # from "never attempted" (chunk_type stays null either way);
-                # flagged explicitly here so the chunk shows up in the UI as
-                # a parse failure to investigate/retry rather than looking
-                # identical to a chunk that just hasn't been reached yet.
+                # text, or — most often, per the max_tokens comment on
+                # classify_chunk — an empty string because an effort/
+                # thinking-capable model spent its whole budget on invisible
+                # reasoning). That used to be silently indistinguishable from
+                # "never attempted" (chunk_type stays null either way);
+                # flagged explicitly here, with the actual raw model text
+                # attached (truncated) so a repeat failure is debuggable
+                # instead of a repeat guess.
                 c["classification_parse_failed"] = True
+                raw = getattr(llm, "last_classify_raw", None)
+                c["classification_parse_error_raw"] = raw[:500] if raw else "(empty response)"
                 parse_failures += 1
                 progress["parse_failed"] = parse_failures
             if (i + 1) % SAVE_EVERY == 0:
