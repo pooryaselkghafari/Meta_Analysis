@@ -430,10 +430,23 @@ function hideProgressBar() {
   extractProgress.hidden = true;
 }
 
-async function pollProgress() {
-  try {
-    const res = await fetch('/api/main-ai/extract/progress');
-    const p = await res.json();
+// Extraction now runs in a background thread on the server (see app.py) so
+// the POST below only starts the job and returns immediately -- the actual
+// work is tracked by polling /progress until it reports running:false. This
+// avoids the run being killed by a proxy/timeout partway through on large
+// corpora with a slow main model, which used to surface as "Extraction
+// failed -- check the server log" even though the backend was still working.
+async function pollUntilExtractionDone() {
+  for (;;) {
+    let p;
+    try {
+      const res = await fetch('/api/main-ai/extract/progress');
+      p = await res.json();
+    } catch (e) {
+      // transient poll failure -- wait and retry rather than giving up
+      await new Promise(r => setTimeout(r, 1500));
+      continue;
+    }
     const pct = p.total ? Math.round(100 * p.chunk_index / p.total) : 0;
     extractProgressFill.style.width = `${pct}%`;
     extractProgressLabel.textContent = p.paper_id
@@ -441,8 +454,8 @@ async function pollProgress() {
       : `Chunk ${p.chunk_index}/${p.total} (${p.records_found} records so far) — ${pct}%`;
     extractStatus.textContent = `Extracting… ${p.extracted}/${p.total} chunks done`;
     await Promise.all([loadPapers(), loadRecords()]);
-  } catch (e) {
-    // ignore — a single poll failing isn't fatal, the next one will retry
+    if (!p.running) return p;
+    await new Promise(r => setTimeout(r, 1500));
   }
 }
 
@@ -451,26 +464,30 @@ extractBtn.addEventListener('click', async () => {
   extractStatus.textContent = 'Extracting…';
   extractStatus.classList.add('busy');
   showProgressBar();
-  const progressTimer = setInterval(pollProgress, 1500);
-  pollProgress();
   try {
     const res = await fetch('/api/main-ai/extract', { method: 'POST' });
     const data = await res.json();
-    clearInterval(progressTimer);
-    hideProgressBar();
     if (!res.ok) {
+      hideProgressBar();
       extractStatus.textContent = data.error || 'Extraction failed.';
       extractStatus.classList.remove('busy');
       extractBtn.disabled = false;
       await Promise.all([loadPapers(), loadRecords()]);
       return;
     }
-    const dupNote = data.duplicates_removed ? ` (removed ${data.duplicates_removed} rounded duplicate${data.duplicates_removed === 1 ? '' : 's'})` : '';
-    extractStatus.textContent = `Extracted ${data.extracted} of ${data.total} chunks — ${data.records} record${data.records === 1 ? '' : 's'} total${dupNote}.`;
+    const finalProgress = await pollUntilExtractionDone();
+    hideProgressBar();
+    if (finalProgress.error) {
+      extractStatus.textContent = `${finalProgress.error} (${finalProgress.extracted}/${finalProgress.total} chunks completed before the error — already-extracted chunks won't be redone if you retry).`;
+    } else {
+      const dupNote = finalProgress.duplicates_removed
+        ? ` (removed ${finalProgress.duplicates_removed} rounded duplicate${finalProgress.duplicates_removed === 1 ? '' : 's'})`
+        : '';
+      extractStatus.textContent = `Extracted ${finalProgress.extracted} of ${finalProgress.total} chunks — ${finalProgress.records_found} record${finalProgress.records_found === 1 ? '' : 's'} total${dupNote}.`;
+    }
     extractStatus.classList.remove('busy');
     await Promise.all([loadPapers(), loadRecords()]);
   } catch (e) {
-    clearInterval(progressTimer);
     hideProgressBar();
     extractStatus.textContent = 'Extraction failed — check the server log.';
     extractStatus.classList.remove('busy');

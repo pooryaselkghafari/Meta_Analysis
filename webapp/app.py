@@ -28,6 +28,7 @@ import re
 import shutil
 import statistics
 import sys
+import threading
 import time
 import uuid
 from collections import Counter
@@ -818,11 +819,33 @@ def _progress_path(stage: str) -> Path:
 
 
 def _read_progress(stage: str, default: dict) -> dict:
-    return _load_json(_progress_path(stage), dict(default))
+    # Tolerate a torn read: a poll landing exactly between _write_progress's
+    # truncate and its new content being flushed would otherwise raise
+    # JSONDecodeError and crash that request. _write_progress below writes
+    # atomically (temp file + os.replace) precisely to make this impossible
+    # going forward, but this stays as a defensive fallback for any
+    # leftover/partial file from before that fix, or a reader hitting the
+    # file on a filesystem where replace isn't fully atomic.
+    path = _progress_path(stage)
+    if not path.exists():
+        return dict(default)
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return dict(default)
 
 
 def _write_progress(stage: str, data: dict) -> None:
-    _progress_path(stage).write_text(json.dumps(data))
+    # Write atomically: a plain write_text() truncates the file in place, so
+    # a concurrent poller (the frontend polls every 1.5s, and multiple
+    # gunicorn workers could poll at once) can land mid-write and read an
+    # empty/partial file. Writing to a temp file in the same directory and
+    # os.replace()-ing it over the real path means every reader always sees
+    # either the old, complete content or the new, complete content.
+    path = _progress_path(stage)
+    tmp_path = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+    tmp_path.write_text(json.dumps(data))
+    os.replace(tmp_path, path)
 
 
 @app.route("/api/cheap-ai/classify/progress", methods=["GET"])
@@ -1578,51 +1601,30 @@ def main_ai_dedupe():
     return jsonify({"removed": removed, "records": len(deduped)})
 
 
-@app.route("/api/main-ai/extract", methods=["POST"])
-def main_ai_extract():
-    """Run Stage 4 extraction (the main/expensive AI) over every chunk Stage 3
-    detection said yes to. Refuses to run (400) if the main AI's API key isn't
-    set or the extraction prompt is blank. The paper-metadata pass (Stage 4a)
-    is skipped silently (not an error) if its own prompt is blank — extraction
-    still works fine without it, just leaves paper-level fields null unless a
-    specific chunk states them.
+_EXTRACT_THREAD_LOCK = threading.Lock()
+
+
+def _run_extraction_job(output_dir: Path, all_chunks: list, extractable: list,
+                         targets: dict, ontology: dict, cfg, abstracts: dict,
+                         paper_metadata: dict) -> None:
+    """Runs the Stage 4 extraction loop in a background thread so the HTTP
+    request that kicks it off can return immediately. This is the fix for
+    "Extraction failed — check the server log" reports where the run stops
+    partway through: the old code ran this entire loop synchronously inside
+    a single request, so on a large corpus with the (usually slower,
+    thinking-capable) main model, the request could run long enough for
+    nginx's or gunicorn's timeout to kill the connection mid-run — the
+    browser then sees a dead/non-JSON response and throws, even though the
+    backend was still working. Progress (and partial records/chunks) were
+    always saved incrementally, which is why clicking "run extraction" again
+    resumed instead of restarting — that resume behavior is preserved as-is;
+    only the blocking-request part is fixed here.
     """
-    all_chunks = _kept_chunks()
-    extractable = _extractable_chunks(all_chunks)
-    if not extractable:
-        return jsonify({"error": "no chunks have passed detection yet — run Detection AI first"}), 400
-
-    err = _ai_readiness_error("main", "extraction")
-    if err:
-        return jsonify({"error": err}), 400
-
-    targets = _load_json(TARGETS_PATH, {})
-    ontology = _load_json(ONTOLOGY_PATH, {})
-    cfg = settings_store.load_model_config()
     llm = LLMClient(cfg)
-
-    abstracts = _abstracts_by_paper()
-    methodology_text = _methodology_text_by_paper(all_chunks)
-    paper_metadata_prompt = prompts_store.load().get("paper_metadata", {})
-    paper_metadata_configured = bool(
-        paper_metadata_prompt.get("system", "").strip() or paper_metadata_prompt.get("user", "").strip()
-    )
-    paper_metadata: dict = {}
-    if paper_metadata_configured:
-        for paper_id in sorted({c["paper_id"] for c in extractable}):
-            try:
-                meta = llm.extract_paper_metadata(abstracts.get(paper_id), methodology_text.get(paper_id, ""))
-            except Exception:
-                meta = None
-            if meta:
-                paper_metadata[paper_id] = meta
-
-    # Extraction calls the main (usually pricier/slower) model, so save more
-    # eagerly than the cheap stages do — same reasoning, smaller batch size.
     SAVE_EVERY = 3
     extracted_chunks = 0
     total = len(extractable)
-    records = _load_json(OUTPUT_DIR / "records.json", [])
+    records = _load_json(output_dir / "records.json", [])
     progress = dict(_EXTRACT_PROGRESS_DEFAULT)
     progress.update(
         running=True, paper_id=extractable[0]["paper_id"] if extractable else None,
@@ -1652,11 +1654,11 @@ def main_ai_extract():
                 )
             except Exception as e:
                 _save_kept_chunks(all_chunks)
-                (OUTPUT_DIR / "records.json").write_text(json.dumps(records, indent=2))
+                (output_dir / "records.json").write_text(json.dumps(records, indent=2))
                 progress["error"] = str(e)
                 progress["running"] = False
                 _write_progress("extract", progress)
-                return jsonify({"error": str(e), "extracted": extracted_chunks, "total": total}), 502
+                return
 
             # Drop any earlier records sourced from this exact chunk before
             # adding fresh ones, so re-running extraction over an
@@ -1671,7 +1673,7 @@ def main_ai_extract():
             progress["records_found"] = len(records)
             if (i + 1) % SAVE_EVERY == 0:
                 _save_kept_chunks(all_chunks)
-                (OUTPUT_DIR / "records.json").write_text(json.dumps(records, indent=2))
+                (output_dir / "records.json").write_text(json.dumps(records, indent=2))
                 _write_progress("extract", progress)
 
         # Text and a table chunk from the same paper can each independently
@@ -1681,16 +1683,82 @@ def main_ai_extract():
         records, deduped_count = _dedupe_rounded_records(records)
 
         _save_kept_chunks(all_chunks)
-        (OUTPUT_DIR / "records.json").write_text(json.dumps(records, indent=2))
+        (output_dir / "records.json").write_text(json.dumps(records, indent=2))
+        progress["duplicates_removed"] = deduped_count
         # No explicit "mark done" needed — _load_state() recomputes
         # main_ai_done directly from the 'extraction_done' fields just written.
-        return jsonify({
-            "total": total, "extracted": extracted_chunks, "records": len(records),
-            "duplicates_removed": deduped_count,
-        })
     finally:
         progress["running"] = False
         _write_progress("extract", progress)
+
+
+@app.route("/api/main-ai/extract", methods=["POST"])
+def main_ai_extract():
+    """Kick off Stage 4 extraction (the main/expensive AI) over every chunk
+    Stage 3 detection said yes to. Refuses to run (400) if the main AI's API
+    key isn't set or the extraction prompt is blank. The paper-metadata pass
+    (Stage 4a) is skipped silently (not an error) if its own prompt is blank
+    — extraction still works fine without it, just leaves paper-level fields
+    null unless a specific chunk states them.
+
+    Runs the actual extraction loop in a background thread (see
+    _run_extraction_job) rather than blocking this request until every chunk
+    is done — a large corpus with a slow/thinking-capable main model can take
+    long enough that a synchronous request gets killed by a proxy or worker
+    timeout partway through. The frontend already polls
+    /api/main-ai/extract/progress for the progress bar, so it also uses that
+    to detect completion now instead of waiting on this response.
+    """
+    all_chunks = _kept_chunks()
+    extractable = _extractable_chunks(all_chunks)
+    if not extractable:
+        return jsonify({"error": "no chunks have passed detection yet — run Detection AI first"}), 400
+
+    err = _ai_readiness_error("main", "extraction")
+    if err:
+        return jsonify({"error": err}), 400
+
+    with _EXTRACT_THREAD_LOCK:
+        current = _read_progress("extract", _EXTRACT_PROGRESS_DEFAULT)
+        if current.get("running"):
+            return jsonify({"error": "an extraction run is already in progress"}), 409
+
+        targets = _load_json(TARGETS_PATH, {})
+        ontology = _load_json(ONTOLOGY_PATH, {})
+        cfg = settings_store.load_model_config()
+        llm = LLMClient(cfg)
+
+        abstracts = _abstracts_by_paper()
+        methodology_text = _methodology_text_by_paper(all_chunks)
+        paper_metadata_prompt = prompts_store.load().get("paper_metadata", {})
+        paper_metadata_configured = bool(
+            paper_metadata_prompt.get("system", "").strip() or paper_metadata_prompt.get("user", "").strip()
+        )
+        paper_metadata: dict = {}
+        if paper_metadata_configured:
+            for paper_id in sorted({c["paper_id"] for c in extractable}):
+                try:
+                    meta = llm.extract_paper_metadata(abstracts.get(paper_id), methodology_text.get(paper_id, ""))
+                except Exception:
+                    meta = None
+                if meta:
+                    paper_metadata[paper_id] = meta
+
+        # Mark as running immediately (before the thread starts) so a second
+        # click, or a second gunicorn worker handling it, sees it as busy
+        # right away instead of racing the thread's own first write.
+        starting_progress = dict(_EXTRACT_PROGRESS_DEFAULT)
+        starting_progress.update(running=True, total=len(extractable), paper_id=extractable[0]["paper_id"])
+        _write_progress("extract", starting_progress)
+
+        thread = threading.Thread(
+            target=_run_extraction_job,
+            args=(OUTPUT_DIR, all_chunks, extractable, targets, ontology, cfg, abstracts, paper_metadata),
+            daemon=True,
+        )
+        thread.start()
+
+    return jsonify({"started": True, "total": len(extractable)})
 
 
 # --------------------------------------------------------------------------- #
