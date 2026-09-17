@@ -703,6 +703,35 @@ def _ai_readiness_error(slot: str, stage: str):
     return None
 
 
+# Per-call token budget for the cheap-model Stage 2/3 calls
+# (classify_chunk/detect_estimate) — see the max_tokens docstring on both in
+# llm.py for why this needs to be generous at all: an effort/thinking-capable
+# model on the cheap slot can burn the whole cap on invisible reasoning
+# tokens before writing any visible answer, silently returning an empty,
+# unparseable response.
+#
+# Scales UP with corpus size rather than down: a bigger upload is a bigger,
+# higher-stakes run where a handful of silently truncated chunks buried among
+# hundreds is far more annoying to notice and re-run than the same failure on
+# a 3-paper test run — so it's worth spending a bit more per call to make
+# truncation as close to impossible as practical, and cost is a secondary
+# concern next to a run finishing cleanly. A small upload doesn't need as
+# much headroom, so it stays cheaper by default.
+_CHEAP_CALL_MAX_TOKENS_TIERS = (
+    (5, 512),      # <=5 papers
+    (20, 1024),    # 6-20 papers
+    (None, 2048),  # 21+ papers
+)
+
+
+def _cheap_call_max_tokens() -> int:
+    n_papers = len(list(INPUT_DIR.glob("*.pdf")))
+    for threshold, tokens in _CHEAP_CALL_MAX_TOKENS_TIERS:
+        if threshold is None or n_papers <= threshold:
+            return tokens
+    return _CHEAP_CALL_MAX_TOKENS_TIERS[-1][1]  # unreachable, but keeps this defensive
+
+
 # --------------------------------------------------------------------------- #
 # Cheap AI #1 — Stage 2 classification over already-kept chunks
 # --------------------------------------------------------------------------- #
@@ -921,6 +950,7 @@ def cheap_ai_classify():
 
     cfg = settings_store.load_model_config()
     llm = LLMClient(cfg)
+    cheap_max_tokens = _cheap_call_max_tokens()
 
     # Each chunk is a separate blocking API call, so a full run over hundreds
     # of chunks can take minutes. Save to disk every few chunks (not just at
@@ -959,7 +989,7 @@ def cheap_ai_classify():
             progress["chunk_index"] = i + 1
             _write_progress("classify", progress)
             try:
-                result = llm.classify_chunk(c["text"])
+                result = llm.classify_chunk(c["text"], max_tokens=cheap_max_tokens)
             except Exception as e:
                 _save_kept_chunks(all_chunks)  # keep whatever progress was made
                 progress["error"] = str(e)
@@ -1140,6 +1170,7 @@ def detection_ai_detect():
     targets = _load_json(TARGETS_PATH, {})
     cfg = settings_store.load_model_config()
     llm = LLMClient(cfg)
+    cheap_max_tokens = _cheap_call_max_tokens()
 
     # Same reasoning as Cheap AI classification: this can run for minutes
     # over hundreds of chunks, so save to disk every few chunks (not just at
@@ -1172,7 +1203,7 @@ def detection_ai_detect():
                 "keep": c.get("keep_classification"),
             }
             try:
-                result = llm.detect_estimate(c["text"], targets, classification_context)
+                result = llm.detect_estimate(c["text"], targets, classification_context, max_tokens=cheap_max_tokens)
             except Exception as e:
                 _save_kept_chunks(all_chunks)  # keep whatever progress was made
                 progress["error"] = str(e)

@@ -317,7 +317,7 @@ class LLMClient:
         }
 
     # ----- Stage 2: classification (cheap) -----
-    def classify_chunk(self, chunk_text: str) -> Optional[Dict[str, Any]]:
+    def classify_chunk(self, chunk_text: str, max_tokens: int = 1024) -> Optional[Dict[str, Any]]:
         """Returns {"labels": [...], "primary": "...", "confidence": float|None,
         "keep": bool} or None if the prompt is blank or nothing parseable came
         back.
@@ -337,11 +337,18 @@ class LLMClient:
         deterministic even at temperature 0 on real provider APIs, which is
         why this showed up as an inconsistent, evolving handful of failing
         chunks across repeated runs rather than the same ones every time.
+
+        The default (1024) is what a single caller gets if it doesn't pass
+        anything — the webapp scales this up further for larger corpora (see
+        app.py's _cheap_call_max_tokens): a bigger run is treated as higher-
+        stakes and worth spending more per call to make sure a truncated
+        response never happens, rather than saving tokens on a run where a
+        silent failure is more costly to notice and redo.
         """
         system, user = prompts.classification_prompt(chunk_text)
         if self._prompt_blank(system, user):
             return None
-        out = self._call(self.cfg.cheap, system, user, max_tokens=1024)
+        out = self._call(self.cfg.cheap, system, user, max_tokens=max_tokens)
         self.last_classify_raw = out
         return self._parse_classification_result(out)
 
@@ -441,7 +448,8 @@ class LLMClient:
 
     # ----- Stage 3: detection (cheap) -----
     def detect_estimate(self, chunk_text: str, targets: dict,
-                         classification: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+                         classification: Optional[Dict[str, Any]] = None,
+                         max_tokens: int = 1024) -> Optional[Dict[str, Any]]:
         """Returns {"detected": bool, "confidence": "high"/"medium"/"low"/None,
         "target_match": {...}/None, "keep_reason": str/None}, or None if the
         prompt is blank or nothing parseable came back.
@@ -455,11 +463,12 @@ class LLMClient:
         an effort/thinking-capable model on the cheap slot can burn the
         whole budget on invisible reasoning tokens before producing any
         visible text, silently returning an empty string that looks
-        identical to a genuine failure."""
+        identical to a genuine failure. Same scaling note as classify_chunk:
+        the webapp raises this further for larger corpora."""
         system, user = prompts.detection_prompt(chunk_text, targets, classification)
         if self._prompt_blank(system, user):
             return None
-        out = self._call(self.cfg.cheap, system, user, max_tokens=1024)
+        out = self._call(self.cfg.cheap, system, user, max_tokens=max_tokens)
         self.last_detect_raw = out
         return self._parse_detection_result(out)
 
