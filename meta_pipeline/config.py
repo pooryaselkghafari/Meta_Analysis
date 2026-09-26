@@ -117,6 +117,46 @@ def effort_levels_for(model: str) -> List[str]:
     return MODEL_EFFORT_LEVELS.get(model, [])
 
 
+# Stage 4 extraction token budget.
+#
+# On effort/thinking-capable models, invisible reasoning tokens count against
+# the same max_tokens (Anthropic) / max_output_tokens (OpenAI/Google) ceiling
+# as the visible JSON. A fixed 16k was enough for low-effort Sonnet on modest
+# tables, but Opus / high–max effort routinely burns that budget on thinking
+# and returns an empty text block — looking like a "no elasticities" reject.
+#
+# Budget = reserved room for the JSON answer + thinking headroom scaled by
+# the configured effort. Non-thinking models (e.g. Haiku) just get the floor.
+_EXTRACTION_OUTPUT_RESERVE = 12_000
+_EXTRACTION_MAX_CAP = 128_000  # common Claude / GPT-5.x output ceiling
+_EFFORT_THINKING_HEADROOM: Dict[str, int] = {
+    "none": 0,
+    "minimal": 2_048,
+    "low": 8_000,
+    "medium": 16_000,
+    "high": 32_000,
+    "xhigh": 48_000,
+    "max": 96_000,
+}
+
+
+def extraction_max_tokens_for(stage: "AIModelConfig",
+                              floor: int = 16_000) -> int:
+    """Per-call max_tokens for Stage 4 extraction, scaled to the main slot's
+    model + effort. ``floor`` is also the budget used when the model has no
+    effort/thinking control (same role as ModelConfig.extraction_max_tokens)."""
+    levels = effort_levels_for(stage.model)
+    if not levels:
+        return floor
+    # API default effort is "high" when the parameter is omitted — match that
+    # so an unset Settings dropdown still gets enough headroom.
+    effort = stage.effort if stage.effort in levels else (
+        "high" if "high" in levels else levels[-1]
+    )
+    thinking = _EFFORT_THINKING_HEADROOM.get(effort, 32_000)
+    return min(_EXTRACTION_MAX_CAP, max(floor, _EXTRACTION_OUTPUT_RESERVE + thinking))
+
+
 @dataclass
 class AIModelConfig:
     """One independently configurable AI slot: its own model name, its own
@@ -175,6 +215,10 @@ class ModelConfig:
     validation: AIModelConfig = field(default_factory=lambda: AIModelConfig(
         label="validation", model="claude-sonnet-5"))
     max_tokens: int = 2000
+    # Floor / non-thinking default for Stage 4. Actual per-call budget is
+    # computed by extraction_max_tokens_for(main) so Opus + high effort gets
+    # tens of thousands more headroom than Haiku on the same slot.
+    extraction_max_tokens: int = 16000
     temperature: float = 0.0
 
     def slots(self) -> Dict[str, AIModelConfig]:

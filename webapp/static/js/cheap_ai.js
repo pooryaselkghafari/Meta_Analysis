@@ -176,38 +176,58 @@ function setPauseButton(paused) {
   pauseBtn.disabled = false;
 }
 
-async function pollProgress() {
-  try {
-    const res = await fetch('/api/cheap-ai/classify/progress');
-    const p = await res.json();
-    const pct = p.total ? Math.round(100 * p.chunk_index / p.total) : 0;
-    classifyProgressFill.style.width = `${pct}%`;
-    setPauseButton(p.paused);
-    if (p.paused) {
-      classifyProgressLabel.textContent = `Paused — chunk ${p.chunk_index}/${p.total} (${p.classified} classified) — ${pct}%`;
-      classifyStatus.textContent = `Paused. ${p.classified}/${p.total} done so far.`;
-      classifyStatus.classList.remove('busy');
-    } else {
-      classifyProgressLabel.textContent = p.paper_id
-        ? `Working on "${p.paper_id}" — chunk ${p.chunk_index}/${p.total} (${p.classified} classified) — ${pct}%`
-        : `Chunk ${p.chunk_index}/${p.total} (${p.classified} classified) — ${pct}%`;
-      classifyStatus.textContent = `Classifying kept chunks… ${p.classified}/${p.total} done`;
-      classifyStatus.classList.add('busy');
-    }
+function applyClassifyProgress(p) {
+  // Progress bar tracks completed work (source of truth), not "chunk entered".
+  const done = p.completed != null ? p.completed : p.classified;
+  const pct = p.total ? Math.round(100 * done / p.total) : 0;
+  classifyProgressFill.style.width = `${pct}%`;
+  setPauseButton(!!p.paused);
+  if (p.paused) {
+    classifyProgressLabel.textContent = `Paused — ${done}/${p.total} completed (${p.classified} classified) — ${pct}%`;
+    classifyStatus.textContent = `Paused. ${p.classified}/${p.total} done so far.`;
+    classifyStatus.classList.remove('busy');
+  } else {
+    classifyProgressLabel.textContent = p.paper_id
+      ? `Working on "${p.paper_id}" — ${done}/${p.total} completed (${p.classified} classified) — ${pct}%`
+      : `${done}/${p.total} completed (${p.classified} classified) — ${pct}%`;
+    classifyStatus.textContent = `Classifying kept chunks… ${done}/${p.total} done`;
+    classifyStatus.classList.add('busy');
+  }
+}
 
-    // refresh the thumb rail and, if it's the paper currently being worked
-    // on, the manuscript view too, so labels appear as they land.
-    const papersRes = await fetch('/api/cheap-ai/papers');
-    const papersData = await papersRes.json();
-    papers = papersData.papers;
-    renderThumbs();
-    if (activeId && activeId === p.paper_id) {
-      const chunksRes = await fetch(`/api/cheap-ai/papers/${activeId}/chunks`);
-      const chunksData = await chunksRes.json();
-      renderManuscript(activeId, chunksData.chunks);
+async function refreshClassifyViews(paperId) {
+  const papersRes = await fetch('/api/cheap-ai/papers');
+  const papersData = await papersRes.json();
+  papers = papersData.papers;
+  renderThumbs();
+  if (activeId && activeId === paperId) {
+    const chunksRes = await fetch(`/api/cheap-ai/papers/${activeId}/chunks`);
+    const chunksData = await chunksRes.json();
+    renderManuscript(activeId, chunksData.chunks);
+  }
+}
+
+// Job runs in a detached subprocess; POST only starts it. Progress file is
+// the source of truth — poll until running:false so proxy timeouts can't
+// kill the UI when models get slower.
+async function pollUntilClassifyDone() {
+  for (;;) {
+    let p;
+    try {
+      const res = await fetch('/api/cheap-ai/classify/progress');
+      p = await res.json();
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 1500));
+      continue;
     }
-  } catch (e) {
-    // ignore — a single poll failing isn't fatal, the next one will retry
+    applyClassifyProgress(p);
+    try {
+      await refreshClassifyViews(p.paper_id);
+    } catch (e) {
+      // view refresh is best-effort during a run
+    }
+    if (!p.running) return p;
+    await new Promise(r => setTimeout(r, 1500));
   }
 }
 
@@ -216,8 +236,10 @@ pauseBtn.addEventListener('click', async () => {
   const isPaused = pauseBtn.classList.contains('is-paused');
   const endpoint = isPaused ? '/api/cheap-ai/classify/resume' : '/api/cheap-ai/classify/pause';
   try {
-    await fetch(endpoint, { method: 'POST' });
-    await pollProgress();
+    const res = await fetch(endpoint, { method: 'POST' });
+    const p = await res.json();
+    if (res.ok) applyClassifyProgress(p);
+    else pauseBtn.disabled = false;
   } catch (e) {
     pauseBtn.disabled = false;
   }
@@ -230,28 +252,47 @@ classifyBtn.addEventListener('click', async () => {
   showProgressBar();
   pauseBtn.hidden = false;
   setPauseButton(false);
-  const progressTimer = setInterval(pollProgress, 1500);
-  pollProgress();
   try {
     const res = await fetch('/api/cheap-ai/classify', { method: 'POST' });
     const data = await res.json();
-    clearInterval(progressTimer);
-    hideProgressBar();
-    pauseBtn.hidden = true;
     if (!res.ok) {
+      if (res.status === 409) {
+        const finalProgress = await pollUntilClassifyDone();
+        hideProgressBar();
+        pauseBtn.hidden = true;
+        if (finalProgress.error) {
+          classifyStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.classified}/${finalProgress.total} completed before the error).`;
+        } else {
+          classifyStatus.textContent = finalProgress.parse_failed
+            ? `Classified ${finalProgress.classified} of ${finalProgress.total} chunks — ${finalProgress.parse_failed} had a response that didn't parse (flagged below; try "Update classification" again).`
+            : `Classified ${finalProgress.classified} of ${finalProgress.total} chunks.`;
+        }
+        classifyStatus.classList.remove('busy');
+        classifyBtn.disabled = false;
+        await loadPapers();
+        return;
+      }
+      hideProgressBar();
+      pauseBtn.hidden = true;
       classifyStatus.textContent = data.error || 'Classification failed.';
       classifyStatus.classList.remove('busy');
       classifyBtn.disabled = false;
       await loadPapers();
       return;
     }
-    classifyStatus.textContent = data.parse_failed
-      ? `Classified ${data.classified} of ${data.total} chunks — ${data.parse_failed} had a response that didn't parse (flagged below; try "Update classification" again).`
-      : `Classified ${data.classified} of ${data.total} chunks.`;
+    const finalProgress = await pollUntilClassifyDone();
+    hideProgressBar();
+    pauseBtn.hidden = true;
+    if (finalProgress.error) {
+      classifyStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.classified}/${finalProgress.total} completed before the error).`;
+    } else {
+      classifyStatus.textContent = finalProgress.parse_failed
+        ? `Classified ${finalProgress.classified} of ${finalProgress.total} chunks — ${finalProgress.parse_failed} had a response that didn't parse (flagged below; try "Update classification" again).`
+        : `Classified ${finalProgress.classified} of ${finalProgress.total} chunks.`;
+    }
     classifyStatus.classList.remove('busy');
     await loadPapers();
   } catch (e) {
-    clearInterval(progressTimer);
     hideProgressBar();
     pauseBtn.hidden = true;
     classifyStatus.textContent = 'Classification failed — check the server log.';
@@ -261,4 +302,32 @@ classifyBtn.addEventListener('click', async () => {
   classifyBtn.disabled = false;
 });
 
+async function resumeClassifyIfRunning() {
+  try {
+    const res = await fetch('/api/cheap-ai/classify/progress');
+    const p = await res.json();
+    if (!p.running) return;
+    classifyBtn.disabled = true;
+    showProgressBar();
+    pauseBtn.hidden = false;
+    applyClassifyProgress(p);
+    const finalProgress = await pollUntilClassifyDone();
+    hideProgressBar();
+    pauseBtn.hidden = true;
+    if (finalProgress.error) {
+      classifyStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.classified}/${finalProgress.total} completed before the error).`;
+    } else {
+      classifyStatus.textContent = finalProgress.parse_failed
+        ? `Classified ${finalProgress.classified} of ${finalProgress.total} chunks — ${finalProgress.parse_failed} had a response that didn't parse (flagged below; try "Update classification" again).`
+        : `Classified ${finalProgress.classified} of ${finalProgress.total} chunks.`;
+    }
+    classifyStatus.classList.remove('busy');
+    classifyBtn.disabled = false;
+    await loadPapers();
+  } catch (e) {
+    // ignore
+  }
+}
+
 loadPapers();
+resumeClassifyIfRunning();

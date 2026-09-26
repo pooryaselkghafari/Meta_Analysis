@@ -6,6 +6,7 @@ Prompts are left blank in prompts.py; the LLM call structure is in place.
 from .config import (
     PipelineConfig, MarkerConfig, ChunkConfig, ModelConfig, AIModelConfig,
     AVAILABLE_MODELS, MODEL_EFFORT_LEVELS, effort_levels_for,
+    extraction_max_tokens_for,
     PROVIDER_API_KEY_ENV, provider_for, default_api_key_env_for,
 )
 from .pipeline import Pipeline
@@ -21,6 +22,7 @@ from .models import (
 __all__ = [
     "Pipeline", "PipelineConfig", "MarkerConfig", "ChunkConfig", "ModelConfig",
     "AIModelConfig", "AVAILABLE_MODELS", "MODEL_EFFORT_LEVELS", "effort_levels_for",
+    "extraction_max_tokens_for",
     "PROVIDER_API_KEY_ENV", "provider_for", "default_api_key_env_for",
     "LLMClient", "settings_store", "prompts_store",
     "Chunk", "ChunkType", "ExtractionRecord", "ParsedPaper", "PaperMetadata",

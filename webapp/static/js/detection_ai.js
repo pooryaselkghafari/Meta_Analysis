@@ -175,30 +175,49 @@ function hideProgressBar() {
   detectProgress.hidden = true;
 }
 
-async function pollProgress() {
-  try {
-    const res = await fetch('/api/detection-ai/detect/progress');
-    const p = await res.json();
-    const pct = p.total ? Math.round(100 * p.chunk_index / p.total) : 0;
-    detectProgressFill.style.width = `${pct}%`;
-    detectProgressLabel.textContent = p.paper_id
-      ? `Working on "${p.paper_id}" — chunk ${p.chunk_index}/${p.total} (${p.screened} screened) — ${pct}%`
-      : `Chunk ${p.chunk_index}/${p.total} (${p.screened} screened) — ${pct}%`;
-    detectStatus.textContent = `Screening kept chunks… ${p.screened}/${p.total} done`;
+function applyDetectProgress(p) {
+  const done = p.completed != null ? p.completed : p.screened;
+  const pct = p.total ? Math.round(100 * done / p.total) : 0;
+  detectProgressFill.style.width = `${pct}%`;
+  detectProgressLabel.textContent = p.paper_id
+    ? `Working on "${p.paper_id}" — ${done}/${p.total} completed (${p.screened} screened) — ${pct}%`
+    : `${done}/${p.total} completed (${p.screened} screened) — ${pct}%`;
+  detectStatus.textContent = `Screening kept chunks… ${done}/${p.total} done`;
+}
 
-    // refresh the thumb rail and, if it's the paper currently being worked
-    // on, the manuscript view too, so results appear as they land.
-    const papersRes = await fetch('/api/detection-ai/papers');
-    const papersData = await papersRes.json();
-    papers = papersData.papers;
-    renderThumbs();
-    if (activeId && activeId === p.paper_id) {
-      const chunksRes = await fetch(`/api/detection-ai/papers/${activeId}/chunks`);
-      const chunksData = await chunksRes.json();
-      renderManuscript(activeId, chunksData.chunks);
+async function refreshDetectViews(paperId) {
+  const papersRes = await fetch('/api/detection-ai/papers');
+  const papersData = await papersRes.json();
+  papers = papersData.papers;
+  renderThumbs();
+  if (activeId && activeId === paperId) {
+    const chunksRes = await fetch(`/api/detection-ai/papers/${activeId}/chunks`);
+    const chunksData = await chunksRes.json();
+    renderManuscript(activeId, chunksData.chunks);
+  }
+}
+
+// Job runs in a detached subprocess; POST only starts it. Progress file is
+// the source of truth — poll until running:false so proxy timeouts can't
+// kill the UI when models get slower.
+async function pollUntilDetectDone() {
+  for (;;) {
+    let p;
+    try {
+      const res = await fetch('/api/detection-ai/detect/progress');
+      p = await res.json();
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 1500));
+      continue;
     }
-  } catch (e) {
-    // ignore — a single poll failing isn't fatal, the next one will retry
+    applyDetectProgress(p);
+    try {
+      await refreshDetectViews(p.paper_id);
+    } catch (e) {
+      // view refresh is best-effort during a run
+    }
+    if (!p.running) return p;
+    await new Promise(r => setTimeout(r, 1500));
   }
 }
 
@@ -207,25 +226,40 @@ detectBtn.addEventListener('click', async () => {
   detectStatus.textContent = 'Screening kept chunks…';
   detectStatus.classList.add('busy');
   showProgressBar();
-  const progressTimer = setInterval(pollProgress, 1500);
-  pollProgress();
   try {
     const res = await fetch('/api/detection-ai/detect', { method: 'POST' });
     const data = await res.json();
-    clearInterval(progressTimer);
-    hideProgressBar();
     if (!res.ok) {
+      if (res.status === 409) {
+        const finalProgress = await pollUntilDetectDone();
+        hideProgressBar();
+        if (finalProgress.error) {
+          detectStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.screened}/${finalProgress.total} completed before the error).`;
+        } else {
+          detectStatus.textContent = `Screened ${finalProgress.screened} of ${finalProgress.total} chunks — dropped ${finalProgress.dropped || 0}.`;
+        }
+        detectStatus.classList.remove('busy');
+        detectBtn.disabled = false;
+        await loadPapers();
+        return;
+      }
+      hideProgressBar();
       detectStatus.textContent = data.error || 'Detection failed.';
       detectStatus.classList.remove('busy');
       detectBtn.disabled = false;
       await loadPapers();
       return;
     }
-    detectStatus.textContent = `Screened ${data.screened} of ${data.total} chunks — dropped ${data.dropped}.`;
+    const finalProgress = await pollUntilDetectDone();
+    hideProgressBar();
+    if (finalProgress.error) {
+      detectStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.screened}/${finalProgress.total} completed before the error).`;
+    } else {
+      detectStatus.textContent = `Screened ${finalProgress.screened} of ${finalProgress.total} chunks — dropped ${finalProgress.dropped || 0}.`;
+    }
     detectStatus.classList.remove('busy');
     await loadPapers();
   } catch (e) {
-    clearInterval(progressTimer);
     hideProgressBar();
     detectStatus.textContent = 'Detection failed — check the server log.';
     detectStatus.classList.remove('busy');
@@ -234,4 +268,28 @@ detectBtn.addEventListener('click', async () => {
   detectBtn.disabled = false;
 });
 
+async function resumeDetectIfRunning() {
+  try {
+    const res = await fetch('/api/detection-ai/detect/progress');
+    const p = await res.json();
+    if (!p.running) return;
+    detectBtn.disabled = true;
+    showProgressBar();
+    applyDetectProgress(p);
+    const finalProgress = await pollUntilDetectDone();
+    hideProgressBar();
+    if (finalProgress.error) {
+      detectStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.screened}/${finalProgress.total} completed before the error).`;
+    } else {
+      detectStatus.textContent = `Screened ${finalProgress.screened} of ${finalProgress.total} chunks — dropped ${finalProgress.dropped || 0}.`;
+    }
+    detectStatus.classList.remove('busy');
+    detectBtn.disabled = false;
+    await loadPapers();
+  } catch (e) {
+    // ignore
+  }
+}
+
 loadPapers();
+resumeDetectIfRunning();

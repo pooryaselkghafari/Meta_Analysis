@@ -3,26 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Corpus &middot; Meta-Analysis Pipeline</title>
+<title>Corpus &middot; MetaExtract</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
 
-<header class="app-header">
-  <div class="app-title">Meta<span class="accent">Extract</span></div>
-  <div class="project-switcher" id="project-switcher"></div>
-  <nav class="app-nav">
-    <a href="/" class="active">Corpus</a>
-    <a href="/results">Filter results</a>
-    <a href="/cheap-ai">Cheap AI</a>
-    <a href="/detection-ai">Detection AI</a>
-    <a href="/main-ai">Main AI</a>
-    <a href="/regression">Regression</a>
-    <a href="/dashboard">Dashboard</a>
-    <a href="/settings">Settings</a>
-  </nav>
-</header>
+{% set nav_active = 'corpus' %}
+{% include '_header.html' %}
 
+<main class="page-shell">
 <div class="upload-layout">
 
   <!-- Papers panel -->
@@ -33,9 +22,14 @@
     </div>
     <div class="panel-body">
       <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload PDF papers">
-        <div class="dropzone-icon">&#8593;</div>
+        <div class="dropzone-icon" aria-hidden="true">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M12 16V4M12 4L7 9M12 4L17 9" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M4 16V18C4 19.1046 4.89543 20 6 20H18C19.1046 20 20 19.1046 20 18V16" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/>
+          </svg>
+        </div>
         <div class="dropzone-title">Drop PDFs here, or click to browse</div>
-        <div class="dropzone-sub">Macroeconomic papers, one file per PDF</div>
+        <div class="dropzone-sub">PDF only · one file per paper · up to 200&nbsp;MB total</div>
         <input type="file" id="file-input" accept="application/pdf" multiple>
       </div>
 
@@ -62,7 +56,7 @@
           <input type="text" id="product-input" placeholder="e.g. maize">
         </div>
       </div>
-      <div class="hint">Press Enter or comma to add an entry. A cross-price elasticity matches two products from the same list — no need to enter combinations separately.</div>
+      <div class="hint">Press Enter or comma to add. Cross-price elasticities match two products from this list — no need to enter pairs separately.</div>
 
       <div class="analyze-bar">
         <button class="btn-primary" id="analyze-btn">Analyze</button>
@@ -70,16 +64,33 @@
       </div>
 
       <div class="results-summary" id="results-summary">
-        <div class="row"><span>Papers parsed</span><span class="v" id="s-papers">—</span></div>
-        <div class="row"><span>Parse failures</span><span class="v" id="s-failed">—</span></div>
-        <div class="row"><span>Chunks total</span><span class="v" id="s-chunks">—</span></div>
-        <div class="row"><span>Chunks kept</span><span class="v" id="s-kept">—</span></div>
-        <a href="/results" class="cta">Go to next stage: Filter results &rarr;</a>
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-label">Papers parsed</div>
+            <div class="metric-value mono" id="s-papers">—</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Parse failures</div>
+            <div class="metric-value mono" id="s-failed">—</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Chunks total</div>
+            <div class="metric-value mono" id="s-chunks">—</div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">Chunks kept</div>
+            <div class="metric-value mono" id="s-kept">—</div>
+          </div>
+        </div>
+        <div class="summary-actions">
+          <a href="/results" class="btn-primary cta-next">Go to next stage: Filter results →</a>
+        </div>
       </div>
     </div>
   </section>
 
 </div>
+</main>
 
 <script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
 <script src="{{ url_for('static', filename='js/upload.js') }}"></script>

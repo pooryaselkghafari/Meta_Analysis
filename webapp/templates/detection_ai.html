@@ -8,20 +8,8 @@
 </head>
 <body>
 
-<header class="app-header">
-  <div class="app-title">Meta<span class="accent">Extract</span></div>
-  <div class="project-switcher" id="project-switcher"></div>
-  <nav class="app-nav">
-    <a href="/">Corpus</a>
-    <a href="/results">Filter results</a>
-    <a href="/cheap-ai">Cheap AI</a>
-    <a href="/detection-ai" class="active">Detection AI</a>
-    <a href="/main-ai">Main AI</a>
-    <a href="/regression">Regression</a>
-    <a href="/dashboard">Dashboard</a>
-    <a href="/settings">Settings</a>
-  </nav>
-</header>
+{% set nav_active = 'detection_ai' %}
+{% include '_header.html' %}
 
 <div class="results-shell">
   <aside class="thumb-rail" id="thumb-rail">

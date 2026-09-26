@@ -8,32 +8,29 @@
 </head>
 <body>
 
-<header class="app-header">
-  <div class="app-title">Meta<span class="accent">Extract</span></div>
-  <div class="project-switcher" id="project-switcher"></div>
-  <nav class="app-nav">
-    <a href="/">Corpus</a>
-    <a href="/results">Filter results</a>
-    <a href="/cheap-ai">Cheap AI</a>
-    <a href="/detection-ai">Detection AI</a>
-    <a href="/main-ai" class="active">Main AI</a>
-    <a href="/regression">Regression</a>
-    <a href="/dashboard">Dashboard</a>
-    <a href="/settings">Settings</a>
-  </nav>
-</header>
+{% set nav_active = 'main_ai' %}
+{% include '_header.html' %}
 
 <div class="records-layout">
   <div class="records-toolbar">
     <div class="records-toolbar-left">
-      <select class="field-input mono" id="paper-filter">
-        <option value="">All papers</option>
-      </select>
-      <label class="review-filter mono">
-        <input type="checkbox" id="review-only-filter"> Needs review only
+      <label class="paper-filter-wrap" for="paper-filter">
+        <span class="paper-filter-icon" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M14 2v6h6M8 13h8M8 17h5" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </span>
+        <select id="paper-filter" class="paper-filter-select" title="Filter by paper">
+          <option value="">All papers</option>
+        </select>
+        <span class="paper-filter-chevron" aria-hidden="true">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
       </label>
     </div>
     <div class="records-toolbar-right">
+      <button class="btn-secondary" id="download-csv-btn" title="Download the currently filtered results as CSV">Download CSV</button>
       <button class="btn-secondary" id="dedupe-btn" title="Remove records where one coefficient is just a rounded restatement of another (e.g. prose says -0.35, a table says -0.353)">Remove rounded duplicates</button>
       <button class="btn-secondary" id="add-row-btn">+ Add row</button>
       <div class="records-count mono" id="records-count"></div>
@@ -45,21 +42,20 @@
       <thead>
         <tr>
           <th></th>
-          <th>Paper</th>
-          <th>Elasticity type</th>
-          <th>Product</th>
-          <th>Food group</th>
-          <th>Cross w/</th>
-          <th>Paper's elasticity wording</th>
-          <th>Paper's product wording</th>
-          <th>Match</th>
-          <th>Role</th>
-          <th>Type</th>
-          <th>Coef.</th>
-          <th>SE</th>
-          <th>Sig.</th>
-          <th>Spec</th>
-          <th>Review</th>
+          <th class="col-paper sortable" data-sort="paper_id">Paper</th>
+          <th class="sortable" data-sort="target_elasticity_type">Elasticity type</th>
+          <th class="sortable" data-sort="target_product">Product</th>
+          <th class="sortable" data-sort="target_food_group">Food group</th>
+          <th class="sortable" data-sort="target_cross_price_product">Cross w/</th>
+          <th class="sortable" data-sort="paper_elasticity_wording_raw">Paper's elasticity wording</th>
+          <th class="sortable" data-sort="paper_product_wording_raw">Paper's product wording</th>
+          <th class="sortable" data-sort="match_type">Match</th>
+          <th class="sortable" data-sort="variable_role">Role</th>
+          <th class="sortable" data-sort="coefficient">Coef.</th>
+          <th class="sortable" data-sort="standard_error">SE</th>
+          <th class="sortable" data-sort="significance_stars">Sig.</th>
+          <th class="sortable" data-sort="specification_status">Spec</th>
+          <th class="sortable" data-sort="requires_review">Review</th>
           <th></th>
         </tr>
       </thead>

@@ -29,6 +29,29 @@ from .models import Chunk, ParsedPaper, SourceLocation
 _TABLE_LINE = re.compile(r"^\s*\|.*\|\s*$")
 
 # --------------------------------------------------------------------------- #
+# Flattened / non-markdown coefficient tables
+# --------------------------------------------------------------------------- #
+# Many PDFs (esp. scanned journals via pdfplumber/OCR) never produce pipe
+# tables — each cell becomes its own short paragraph. Without special
+# handling, `_sliding_prose` then chops that run at prose_target_chars and
+# the column headers land in one chunk while the coefficients land in the
+# next, so detection can't tell what a number is an elasticity of. Detect
+# these flattened coefficient blocks and treat them like real markdown
+# tables: one atomic chunk with surrounding context.
+_TABLE_CAPTION = re.compile(r"^\s*Table\s+\d+\b", re.I)
+_COEF_LINE = re.compile(r"^-?\d+\.\d+\s*\*{0,3}\s*$")
+_SE_OR_T_LINE = re.compile(r"^\(\s*-?\d+\.?\d*\s*\)\s*$")
+_TABLE_FOOTER = re.compile(
+    # Note:/Source: end with a colon (non-word char), so a trailing \b would
+    # fail when the next char is a space — keep \b only on bare keywords.
+    r"^\s*(Note\s*:|Source\s*:|System\s*R\s*[²2]\b|R-?squared\b|Observations\b)",
+    re.I,
+)
+# Cap so a pathological run can't blow a single LLM context window; real
+# regression tables are well under this.
+_FLATTENED_TABLE_MAX_CHARS = 20000
+
+# --------------------------------------------------------------------------- #
 # Running header/footer boilerplate stripping
 # --------------------------------------------------------------------------- #
 # Journal page headers/footers get re-extracted on every page (e.g. "© Akdeniz
@@ -154,6 +177,139 @@ def _find_table_blocks(lines: List[str]) -> List[Tuple[int, int]]:
     return blocks
 
 
+def _line_table_signal(line: str) -> str:
+    """Classify a single line for flattened-table detection.
+
+    Returns one of: 'coef', 'stat', 'caption', 'footer', 'short', 'prose', 'blank'.
+    """
+    s = line.strip()
+    if not s:
+        return "blank"
+    if _TABLE_CAPTION.match(s):
+        return "caption"
+    if _TABLE_FOOTER.match(s):
+        return "footer"
+    if _COEF_LINE.match(s) or (re.search(r"-?\d+\.\d+", s) and "*" in s and len(s) < 24):
+        return "coef"
+    if _SE_OR_T_LINE.match(s):
+        return "stat"
+    # Short label / header cells ("Cereals", "Fruits &", "Explanatory Variables")
+    if len(s) <= 48 and not s.endswith("."):
+        return "short"
+    return "prose"
+
+
+def _find_flattened_table_blocks(lines: List[str],
+                                  occupied: List[Tuple[int, int]] | None = None
+                                  ) -> List[Tuple[int, int]]:
+    """Find spans that look like regression/result tables but weren't emitted
+    as markdown pipes (OCR / pdfplumber layout flatten).
+
+    A block starts at a ``Table N`` caption, or at a dense burst of coefficient
+    / (se) lines. It then consumes short label lines, coefficients, t-stats,
+    and the trailing Note/Source/R² footer, and stops at the next stretch of
+    real prose (or the char cap). Spans overlapping ``occupied`` (already
+    claimed by real markdown tables) are skipped.
+    """
+    occupied = occupied or []
+    n = len(lines)
+    signals = [_line_table_signal(ln) for ln in lines]
+
+    def _is_occupied(idx: int) -> bool:
+        return any(a <= idx <= b for a, b in occupied)
+
+    def _coef_density(lo: int, hi: int) -> float:
+        window = signals[lo:hi]
+        if not window:
+            return 0.0
+        hits = sum(1 for s in window if s in ("coef", "stat"))
+        return hits / len(window)
+
+    blocks: List[Tuple[int, int]] = []
+    i = 0
+    while i < n:
+        if _is_occupied(i):
+            i += 1
+            continue
+        sig = signals[i]
+        # Start: explicit caption, or a local burst of coef/stat lines.
+        start = None
+        if sig == "caption":
+            start = i
+        elif sig in ("coef", "stat") and _coef_density(i, min(n, i + 12)) >= 0.35:
+            # Walk back over short labels / blanks that are likely column headers.
+            start = i
+            j = i - 1
+            while j >= 0 and not _is_occupied(j) and signals[j] in ("short", "blank", "caption"):
+                start = j
+                if signals[j] == "caption":
+                    break
+                j -= 1
+        if start is None:
+            i += 1
+            continue
+
+        end = start
+        chars = 0
+        k = start
+        while k < n and not _is_occupied(k):
+            s = signals[k]
+            line_len = len(lines[k]) + 1
+            if chars + line_len > _FLATTENED_TABLE_MAX_CHARS and k > start:
+                break
+            if s == "prose":
+                # Long Note:/Source: footers are still part of the table.
+                if _TABLE_FOOTER.match(lines[k].strip()):
+                    end = k
+                    chars += line_len
+                    k += 1
+                    continue
+                # Any other prose means the table body is over — do NOT absorb
+                # the discussion sentence into the table chunk (PDF line-wrap
+                # often leaves a mid-sentence fragment right after the grid).
+                # Surrounding context is re-attached via paras_after_table.
+                if k > start and _coef_density(start, k) >= 0.08:
+                    break
+                # Caption-only "Table N. …" followed by discussion, no coefs yet.
+                if k - start > 3:
+                    break
+            end = k
+            chars += line_len
+            k += 1
+
+        # Require a real coefficient signal — a lone "Table N" caption with
+        # only prose after it is discussion of a table, not the table itself.
+        if _coef_density(start, end + 1) >= 0.08 and (end - start) >= 4:
+            blocks.append((start, end))
+            i = end + 1
+        else:
+            i = start + 1
+
+    # Merge overlapping / near-adjacent blocks. A caption block often abuts a
+    # trailing coefficient run separated only by a Note:/blank gap (common
+    # when the PDF puts overflow columns after the footnote).
+    if not blocks:
+        return []
+    blocks.sort()
+    merged: List[Tuple[int, int]] = [blocks[0]]
+    for a, b in blocks[1:]:
+        pa, pb = merged[-1]
+        gap = lines[pb + 1:a]
+        gap_ok = a <= pb + 2 or (
+            a <= pb + 12
+            and all(_line_table_signal(ln) in ("blank", "footer", "short") for ln in gap)
+        )
+        if a <= pb + 1 or gap_ok:
+            merged[-1] = (pa, max(pb, b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _spans_overlap(a: Tuple[int, int], b: Tuple[int, int]) -> bool:
+    return not (a[1] < b[0] or b[1] < a[0])
+
+
 def _context_paragraphs(text_before: str, text_after: str,
                         n_before: int, n_after: int) -> Tuple[str, str]:
     before = _split_paragraphs(text_before)[-n_before:] if n_before else []
@@ -190,13 +346,22 @@ def chunk_paper(paper: ParsedPaper, cfg: ChunkConfig) -> List[Chunk]:
     md = strip_boilerplate(paper.markdown)
     md = strip_references_section(md)
     lines = md.split("\n")
-    table_blocks = _find_table_blocks(lines)
+    md_table_blocks = _find_table_blocks(lines)
+    # Flattened coefficient blocks (OCR / non-pipe tables) — skipped where a
+    # real markdown table already claimed the lines.
+    flat_blocks = _find_flattened_table_blocks(lines, occupied=md_table_blocks)
+    # Prefer markdown tables when both fire on the same span; otherwise keep both.
+    table_blocks: List[Tuple[int, int]] = list(md_table_blocks)
+    for fb in flat_blocks:
+        if not any(_spans_overlap(fb, mb) for mb in md_table_blocks):
+            table_blocks.append(fb)
+    table_blocks.sort()
 
     chunks: List[Chunk] = []
     consumed_spans: List[Tuple[int, int]] = []
     counter = 0
 
-    # ---- 1. table-anchored chunks ----
+    # ---- 1. table-anchored chunks (markdown pipes OR flattened coef blocks) ----
     for (start, end) in table_blocks:
         table_text = "\n".join(lines[start:end + 1])
         before_text = "\n".join(lines[:start])

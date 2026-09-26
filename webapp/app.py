@@ -22,26 +22,29 @@ estimate, rebuilt (per-chunk) every time Main AI is run or re-run.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import re
 import shutil
 import statistics
 import sys
-import threading
 import time
 import uuid
 from collections import Counter
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request, send_file, abort
+from flask import Flask, Response, jsonify, render_template, request, send_file, abort
 from werkzeug.utils import secure_filename
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from meta_pipeline import Pipeline, PipelineConfig, LLMClient, settings_store  # noqa: E402
 from meta_pipeline import prompts_store, AVAILABLE_MODELS, effort_levels_for  # noqa: E402
 from meta_pipeline.models import ChunkType  # noqa: E402
 import regression  # noqa: E402 — Stage 5: meta-regression over records.json
+import stage_jobs  # noqa: E402 — durable classify/detect/extract subprocess jobs
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -767,95 +770,39 @@ def _classifiable_chunks(chunks: list) -> list:
 
 
 # --------------------------------------------------------------------------- #
-# Cross-worker progress state for the three long-running stage loops
-# (classify/detect/extract), persisted to a small JSON file under the active
-# project's output dir rather than a plain in-memory module-level dict.
+# Durable stage jobs (classify / detect / extract)
 #
-# Gunicorn (see the deploy systemd unit's --workers flag) runs multiple
-# worker PROCESSES, each with its own separate Python memory — a dict
-# written to by the worker running a several-minute classify/detect/extract
-# loop is invisible to whichever OTHER worker happens to answer a /progress
-# poll or a /pause click. A sync worker can only handle one request at a
-# time, so while the loop's worker is busy, literally every other request
-# (including every progress poll) gets served by a different worker whose
-# copy of that dict was never touched — the progress bar silently freezes at
-# whatever that other worker's dict happened to hold, and a /pause click can
-# silently no-op the same way. A small file under OUTPUT_DIR is on the same
-# filesystem for every worker, so it's a shared source of truth regardless of
-# which process answers which request. Writing it once per chunk is cheap —
-# each chunk already costs a full LLM round-trip, dwarfing one small write.
+# Long-running AI loops no longer execute inside the HTTP request (that is
+# what timed out behind nginx/gunicorn when models got slower). Instead:
+#   POST  -> stage_jobs.start_job() claims a lock, spawns a detached
+#            subprocess (job_runner.py), returns immediately
+#   GET /progress -> stage_jobs progress file (shared across gunicorn
+#            workers); also reconciles stale PIDs if the job crashed
+#   frontend polls /progress until running=false — progress is the source
+#            of truth, not the POST response
+# See webapp/stage_jobs.py for the full contract.
 # --------------------------------------------------------------------------- #
-_CLASSIFY_PROGRESS_DEFAULT = {
-    "running": False,
-    "paused": False,      # set by /pause; the loop blocks between chunks while true
-    "paper_id": None,
-    "chunk_index": 0,     # 1-based position of the chunk currently being classified
-    "total": 0,           # total chunks across all papers
-    "classified": 0,      # chunks successfully classified so far
-    "parse_failed": 0,    # chunks where the model answered but parsing failed
-    "error": None,
-}
-_DETECT_PROGRESS_DEFAULT = {
-    "running": False,
-    "paper_id": None,
-    "chunk_index": 0,
-    "total": 0,
-    "screened": 0,
-    "error": None,
-}
-_EXTRACT_PROGRESS_DEFAULT = {
-    "running": False,
-    "paper_id": None,
-    "chunk_index": 0,
-    "total": 0,
-    "extracted": 0,
-    "records_found": 0,
-    "error": None,
-}
 
 
-def _progress_path(stage: str) -> Path:
-    return OUTPUT_DIR / f"_progress_{stage}.json"
-
-
-def _read_progress(stage: str, default: dict) -> dict:
-    # Tolerate a torn read: a poll landing exactly between _write_progress's
-    # truncate and its new content being flushed would otherwise raise
-    # JSONDecodeError and crash that request. _write_progress below writes
-    # atomically (temp file + os.replace) precisely to make this impossible
-    # going forward, but this stays as a defensive fallback for any
-    # leftover/partial file from before that fix, or a reader hitting the
-    # file on a filesystem where replace isn't fully atomic.
-    path = _progress_path(stage)
-    if not path.exists():
-        return dict(default)
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return dict(default)
+def _read_progress(stage: str, default: dict | None = None) -> dict:
+    # `default` kept for call-site compatibility; stage_jobs owns the real
+    # defaults and fills missing keys. Always reconcile stale PIDs so a
+    # crashed job can't leave the UI spinning on running:true forever.
+    return stage_jobs.reconcile_stale_job(_get_active_project_id(), stage)
 
 
 def _write_progress(stage: str, data: dict) -> None:
-    # Write atomically: a plain write_text() truncates the file in place, so
-    # a concurrent poller (the frontend polls every 1.5s, and multiple
-    # gunicorn workers could poll at once) can land mid-write and read an
-    # empty/partial file. Writing to a temp file in the same directory and
-    # os.replace()-ing it over the real path means every reader always sees
-    # either the old, complete content or the new, complete content.
-    path = _progress_path(stage)
-    tmp_path = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
-    tmp_path.write_text(json.dumps(data))
-    os.replace(tmp_path, path)
+    stage_jobs.write_progress(_get_active_project_id(), stage, data)
 
 
 @app.route("/api/cheap-ai/classify/progress", methods=["GET"])
 def cheap_ai_classify_progress():
-    return jsonify(_read_progress("classify", _CLASSIFY_PROGRESS_DEFAULT))
+    return jsonify(_read_progress("classify"))
 
 
 @app.route("/api/cheap-ai/classify/pause", methods=["POST"])
 def cheap_ai_classify_pause():
-    progress = _read_progress("classify", _CLASSIFY_PROGRESS_DEFAULT)
+    progress = _read_progress("classify")
     if not progress["running"]:
         return jsonify({"error": "no classification run is currently in progress"}), 400
     progress["paused"] = True
@@ -865,7 +812,7 @@ def cheap_ai_classify_pause():
 
 @app.route("/api/cheap-ai/classify/resume", methods=["POST"])
 def cheap_ai_classify_resume():
-    progress = _read_progress("classify", _CLASSIFY_PROGRESS_DEFAULT)
+    progress = _read_progress("classify")
     progress["paused"] = False
     _write_progress("classify", progress)
     return jsonify(progress)
@@ -873,12 +820,12 @@ def cheap_ai_classify_resume():
 
 @app.route("/api/detection-ai/detect/progress", methods=["GET"])
 def detection_ai_detect_progress():
-    return jsonify(_read_progress("detect", _DETECT_PROGRESS_DEFAULT))
+    return jsonify(_read_progress("detect"))
 
 
 @app.route("/api/main-ai/extract/progress", methods=["GET"])
 def main_ai_extract_progress():
-    return jsonify(_read_progress("extract", _EXTRACT_PROGRESS_DEFAULT))
+    return jsonify(_read_progress("extract"))
 
 
 @app.route("/api/cheap-ai/papers", methods=["GET"])
@@ -950,20 +897,14 @@ def cheap_ai_chunk_override(paper_id, chunk_id):
 
 @app.route("/api/cheap-ai/classify", methods=["POST"])
 def cheap_ai_classify():
-    """Run Stage 2 classification (the first cheap AI) over every kept chunk,
-    using whichever cheap-model settings are saved on the Settings page.
+    """Start Stage 2 classification as a durable background job.
 
-    Refuses to run (400) if the cheap AI's API key isn't set or the
-    classification prompt is still blank, rather than quietly doing nothing.
+    Returns immediately with ``{started: true, total}``. The frontend must
+    poll ``/api/cheap-ai/classify/progress`` until ``running`` is false —
+    progress is the source of truth, not this response. Refuses (400) if the
+    cheap AI's API key isn't set or the classification prompt is blank.
     """
-    all_chunks = _kept_chunks()
-    # Only chunks Stage 2 should actually judge — never the abstract (it's
-    # reserved as separate whole-paper context for the main extraction AI)
-    # and never anything the heuristic filter actually dropped. `classifiable`
-    # entries are the same dict objects as in `all_chunks`, so mutating them
-    # in place and saving `all_chunks` back keeps the abstract/dropped
-    # entries untouched in chunks_kept.json.
-    classifiable = _classifiable_chunks(all_chunks)
+    classifiable = _classifiable_chunks(_kept_chunks())
     if not classifiable:
         return jsonify({"error": "no classifiable kept chunks yet — run Analyze on the Corpus page first"}), 400
 
@@ -971,109 +912,16 @@ def cheap_ai_classify():
     if err:
         return jsonify({"error": err}), 400
 
-    cfg = settings_store.load_model_config()
-    llm = LLMClient(cfg)
-    cheap_max_tokens = _cheap_call_max_tokens()
-
-    # Each chunk is a separate blocking API call, so a full run over hundreds
-    # of chunks can take minutes. Save to disk every few chunks (not just at
-    # the end) so /api/cheap-ai/papers reflects live progress, and keep the
-    # shared "classify" progress file updated chunk-by-chunk (see
-    # _write_progress above) so the page can show a live progress bar with
-    # the paper currently being worked on, rather than looking stuck for the
-    # whole request.
-    SAVE_EVERY = 5
-    classified = 0
-    parse_failures = 0
-    total = len(classifiable)
-    progress = dict(_CLASSIFY_PROGRESS_DEFAULT)
-    progress.update(
-        running=True, paused=False, paper_id=classifiable[0]["paper_id"] if classifiable else None,
-        chunk_index=0, total=total, classified=0, parse_failed=0, error=None,
-    )
-    _write_progress("classify", progress)
+    project_id = _get_active_project_id()
     try:
-        for i, c in enumerate(classifiable):
-            # Block between chunks while paused, rather than mid-API-call —
-            # a paused run always stops at a clean chunk boundary. Re-read
-            # the shared file (not the local `progress` var) for the pause
-            # check, since the /pause click that set it may have been
-            # answered by a different gunicorn worker than this one. Save
-            # progress to disk as soon as the pause takes effect so a
-            # paused-then-abandoned run doesn't lose anything.
-            if _read_progress("classify", _CLASSIFY_PROGRESS_DEFAULT).get("paused"):
-                _save_kept_chunks(all_chunks)
-                progress["paused"] = True
-                _write_progress("classify", progress)
-                while _read_progress("classify", _CLASSIFY_PROGRESS_DEFAULT).get("paused"):
-                    time.sleep(0.5)
-                progress["paused"] = False
-            progress["paper_id"] = c["paper_id"]
-            progress["chunk_index"] = i + 1
-            _write_progress("classify", progress)
-            try:
-                result = llm.classify_chunk(c["text"], max_tokens=cheap_max_tokens)
-            except Exception as e:
-                _save_kept_chunks(all_chunks)  # keep whatever progress was made
-                progress["error"] = str(e)
-                progress["running"] = False
-                _write_progress("classify", progress)
-                return jsonify({"error": str(e), "classified": classified, "total": total}), 502
-            if result:
-                labels = []
-                for lbl in result.get("labels") or []:
-                    try:
-                        labels.append(ChunkType(lbl).value)
-                    except ValueError:
-                        continue
-                primary = result.get("primary")
-                try:
-                    primary_value = ChunkType(primary).value if primary else (labels[0] if labels else ChunkType.OTHER.value)
-                except ValueError:
-                    primary_value = labels[0] if labels else ChunkType.OTHER.value
-                c["chunk_type"] = primary_value
-                c["labels"] = labels
-                c["classification_confidence"] = result.get("confidence")
-                c["keep_classification"] = result.get("keep")
-                c["classification_parse_failed"] = False
-                c["classification_parse_error_raw"] = None
-                classified += 1
-                progress["classified"] = classified
-            else:
-                # llm.classify_chunk() returns None in exactly two cases: the
-                # prompt is blank, or the model responded but the response
-                # didn't parse into the expected shape. _ai_readiness_error
-                # above already refused to run this whole request if the
-                # prompt were blank, so by the time we're here None can only
-                # mean the second case — the model answered but Stage 2's
-                # parser couldn't use it (malformed/truncated JSON, refusal
-                # text, or — most often, per the max_tokens comment on
-                # classify_chunk — an empty string because an effort/
-                # thinking-capable model spent its whole budget on invisible
-                # reasoning). That used to be silently indistinguishable from
-                # "never attempted" (chunk_type stays null either way);
-                # flagged explicitly here, with the actual raw model text
-                # attached (truncated) so a repeat failure is debuggable
-                # instead of a repeat guess.
-                c["classification_parse_failed"] = True
-                raw = getattr(llm, "last_classify_raw", None)
-                c["classification_parse_error_raw"] = raw[:500] if raw else "(empty response)"
-                parse_failures += 1
-                progress["parse_failed"] = parse_failures
-            if (i + 1) % SAVE_EVERY == 0:
-                _save_kept_chunks(all_chunks)
-                _write_progress("classify", progress)
-
-        _save_kept_chunks(all_chunks)
-        # Classification just (re-)ran, so any prior detection verdicts are
-        # stale — clear them so detection_ai_done correctly recomputes to
-        # False (re-greying Detection AI) until it's re-run against the new
-        # classification.
-        _discard_detection_results()
-        return jsonify({"total": total, "classified": classified, "parse_failed": parse_failures})
-    finally:
-        progress["running"] = False
-        _write_progress("classify", progress)
+        stage_jobs.start_job(
+            project_id, "classify",
+            total=len(classifiable),
+            paper_id=classifiable[0]["paper_id"],
+        )
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 409
+    return jsonify({"started": True, "total": len(classifiable)})
 
 
 # --------------------------------------------------------------------------- #
@@ -1133,13 +981,14 @@ def detection_ai_paper_chunks(paper_id):
 def detection_ai_chunk_override(paper_id, chunk_id):
     """Stage 3 manual edit: a human picks the correct keep_reason from the
     same dropdown of values the model itself must choose from. keep_reason
-    doubles as the detected yes/no call — "off_target" and
-    "no_estimate_signal" both mean "no", every other reason means "yes" —
-    same rule the model itself follows, so picking a reason IS picking
-    detected. A manual "no" drops the chunk from the kept set the same way a
-    cheap-LLM "no" does (passes_filter=False); a manual "yes" undoes that.
-    Extraction records already built from this chunk are purged, scoped to
-    just this chunk."""
+    doubles as the detected yes/no call — see
+    LLMClient.detected_from_keep_reason / _DISCARD_KEEP_REASONS (off_target,
+    no_estimate_signal, literature_estimate_only → no; every other reason →
+    yes). Same rule the parser applies when reconciling a model response
+    that contradicts itself on detected vs keep_reason. A manual "no" drops
+    the chunk from the kept set the same way a cheap-LLM "no" does
+    (passes_filter=False); a manual "yes" undoes that. Extraction records
+    already built from this chunk are purged, scoped to just this chunk."""
     data = request.get_json(force=True) or {}
     keep_reason = data.get("keep_reason")
     if keep_reason not in LLMClient._KEEP_REASONS:
@@ -1150,7 +999,7 @@ def detection_ai_chunk_override(paper_id, chunk_id):
     if chunk is None or chunk.get("paper_id") != paper_id:
         return jsonify({"error": "chunk not found"}), 404
 
-    detected = keep_reason not in ("off_target", "no_estimate_signal")
+    detected = LLMClient.detected_from_keep_reason(keep_reason)
     chunk["keep_reason"] = keep_reason
     chunk["detected"] = detected
     chunk["detection_confidence"] = "manual"
@@ -1165,24 +1014,14 @@ def detection_ai_chunk_override(paper_id, chunk_id):
 
 @app.route("/api/detection-ai/detect", methods=["POST"])
 def detection_ai_detect():
-    """Run Stage 3 detection (the second cheap AI) over every kept chunk: a
-    binary "does this plausibly contain a point estimate for one of the user's
-    targets" screen, using whichever cheap-model settings are saved on the
-    Settings page. Chunks the model says no to are marked passes_filter=False /
-    filter_reason="cheap_llm_negative" — the same outcome Stage 3b would
-    produce in the full pipeline run — so the Cheap AI / Filter results pages
-    and any later extraction step all see a consistent kept set.
+    """Start Stage 3 detection as a durable background job.
 
-    Refuses to run (400) if the cheap AI's API key isn't set or the detection
-    prompt is still blank, rather than quietly doing nothing.
+    Returns immediately with ``{started: true, total}``. Poll
+    ``/api/detection-ai/detect/progress`` until ``running`` is false.
+    Refuses (400) if the cheap AI's API key isn't set or the detection
+    prompt is blank.
     """
-    all_chunks = _kept_chunks()
-    # Same reasoning as Cheap AI classification: never screen the abstract
-    # (it's exempt/reserved context, not a normal candidate chunk) or
-    # anything already dropped. `classifiable` shares dict objects with
-    # `all_chunks`, so in-place edits here are still captured when
-    # `all_chunks` is saved back.
-    classifiable = _classifiable_chunks(all_chunks)
+    classifiable = _classifiable_chunks(_kept_chunks())
     if not classifiable:
         return jsonify({"error": "no classifiable kept chunks yet — run Analyze on the Corpus page first"}), 400
 
@@ -1190,76 +1029,16 @@ def detection_ai_detect():
     if err:
         return jsonify({"error": err}), 400
 
-    targets = _load_json(TARGETS_PATH, {})
-    cfg = settings_store.load_model_config()
-    llm = LLMClient(cfg)
-    cheap_max_tokens = _cheap_call_max_tokens()
-
-    # Same reasoning as Cheap AI classification: this can run for minutes
-    # over hundreds of chunks, so save to disk every few chunks (not just at
-    # the end) and keep the shared "detect" progress file updated
-    # chunk-by-chunk so the page can show a live progress bar with the paper
-    # currently being worked on.
-    SAVE_EVERY = 5
-    screened = 0
-    dropped = 0
-    total = len(classifiable)
-    progress = dict(_DETECT_PROGRESS_DEFAULT)
-    progress.update(
-        running=True, paper_id=classifiable[0]["paper_id"] if classifiable else None,
-        chunk_index=0, total=total, screened=0, error=None,
-    )
-    _write_progress("detect", progress)
+    project_id = _get_active_project_id()
     try:
-        for i, c in enumerate(classifiable):
-            progress["paper_id"] = c["paper_id"]
-            progress["chunk_index"] = i + 1
-            _write_progress("detect", progress)
-            # Hand Stage 2's own output for this chunk to Stage 3 as context —
-            # a high-confidence "regression_table"/"result_text" classification
-            # is a strong prior that a point estimate is present, while "other"
-            # or a keep:false "literature_review" call is a strong prior it isn't.
-            classification_context = {
-                "labels": c.get("labels") or ([c["chunk_type"]] if c.get("chunk_type") else []),
-                "primary": c.get("chunk_type"),
-                "confidence": c.get("classification_confidence"),
-                "keep": c.get("keep_classification"),
-            }
-            try:
-                result = llm.detect_estimate(c["text"], targets, classification_context, max_tokens=cheap_max_tokens)
-            except Exception as e:
-                _save_kept_chunks(all_chunks)  # keep whatever progress was made
-                progress["error"] = str(e)
-                progress["running"] = False
-                _write_progress("detect", progress)
-                return jsonify({"error": str(e), "screened": screened, "total": total}), 502
-            if result is not None:
-                detected = result.get("detected")
-                c["detected"] = detected
-                c["detection_confidence"] = result.get("confidence")
-                c["target_match"] = result.get("target_match")
-                c["keep_reason"] = result.get("keep_reason")
-                screened += 1
-                progress["screened"] = screened
-                if detected is False:
-                    c["passes_filter"] = False
-                    c["filter_reason"] = "cheap_llm_negative"
-                    dropped += 1
-            if (i + 1) % SAVE_EVERY == 0:
-                _save_kept_chunks(all_chunks)
-                _write_progress("detect", progress)
-
-        _save_kept_chunks(all_chunks)
-        # Detection just (re-)ran, so any prior extraction records are stale —
-        # clear them so main_ai_done correctly recomputes to False (re-greying
-        # Main AI) until it's re-run against the new detected set.
-        _discard_extraction_results()
-        # No explicit "mark done" needed — _load_state() recomputes
-        # detection_ai_done directly from the 'detected' fields just written.
-        return jsonify({"total": total, "screened": screened, "dropped": dropped})
-    finally:
-        progress["running"] = False
-        _write_progress("detect", progress)
+        stage_jobs.start_job(
+            project_id, "detect",
+            total=len(classifiable),
+            paper_id=classifiable[0]["paper_id"],
+        )
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 409
+    return jsonify({"started": True, "total": len(classifiable)})
 
 
 # --------------------------------------------------------------------------- #
@@ -1291,6 +1070,122 @@ def main_ai_papers():
 @app.route("/api/main-ai/records", methods=["GET"])
 def main_ai_records():
     return jsonify({"records": _load_json(OUTPUT_DIR / "records.json", [])})
+
+
+# Flat CSV columns for Main AI export — nested JSON fields are expanded so
+# the file opens cleanly in Excel/Sheets without a second parse step.
+_CSV_COLUMNS = [
+    "estimate_id", "paper_id", "source_chunk_id",
+    "target_elasticity_type", "target_product", "target_food_group",
+    "target_cross_price_product", "target_cross_price_food_group",
+    "paper_elasticity_wording_raw", "paper_product_wording_raw",
+    "paper_cross_price_product_wording_raw",
+    "match_type", "target_match_justification", "variable_role", "estimate_type",
+    "coefficient", "standard_error", "standard_error_reported",
+    "ci_low", "ci_high", "confidence_interval_reported",
+    "p_value", "p_value_reported", "significance_stars",
+    "test_statistic_type", "test_statistic_value",
+    "elasticity_is_raw", "elasticity_transformation_type",
+    "elasticity_unit", "unit_source",
+    "specification_status", "baseline_evidence", "model_type",
+    "countries_region", "time_period_start", "time_period_end", "frequency",
+    "n_obs", "n_units", "data_source",
+    "source_type", "source_row", "source_column", "source_page",
+    "table_complete", "pages_used",
+    "requires_review", "review_reason",
+    "manually_edited", "manually_added",
+]
+
+
+def _record_to_csv_row(r: dict) -> dict:
+    ci = r.get("confidence_interval") or []
+    tp = r.get("time_period") or {}
+    ts = r.get("test_statistic") or {}
+    loc = r.get("source_location") or {}
+    reasons = r.get("review_reason") or []
+    pages = r.get("pages_used") or []
+    return {
+        "estimate_id": r.get("estimate_id"),
+        "paper_id": r.get("paper_id"),
+        "source_chunk_id": r.get("source_chunk_id"),
+        "target_elasticity_type": r.get("target_elasticity_type"),
+        "target_product": r.get("target_product"),
+        "target_food_group": r.get("target_food_group"),
+        "target_cross_price_product": r.get("target_cross_price_product"),
+        "target_cross_price_food_group": r.get("target_cross_price_food_group"),
+        "paper_elasticity_wording_raw": r.get("paper_elasticity_wording_raw"),
+        "paper_product_wording_raw": r.get("paper_product_wording_raw"),
+        "paper_cross_price_product_wording_raw": r.get("paper_cross_price_product_wording_raw"),
+        "match_type": r.get("match_type"),
+        "target_match_justification": r.get("target_match_justification"),
+        "variable_role": r.get("variable_role"),
+        "estimate_type": r.get("estimate_type"),
+        "coefficient": r.get("coefficient"),
+        "standard_error": r.get("standard_error"),
+        "standard_error_reported": r.get("standard_error_reported"),
+        "ci_low": ci[0] if len(ci) > 0 else None,
+        "ci_high": ci[1] if len(ci) > 1 else None,
+        "confidence_interval_reported": r.get("confidence_interval_reported"),
+        "p_value": r.get("p_value"),
+        "p_value_reported": r.get("p_value_reported"),
+        "significance_stars": r.get("significance_stars"),
+        "test_statistic_type": ts.get("type") if isinstance(ts, dict) else None,
+        "test_statistic_value": ts.get("value") if isinstance(ts, dict) else None,
+        "elasticity_is_raw": r.get("elasticity_is_raw"),
+        "elasticity_transformation_type": r.get("elasticity_transformation_type"),
+        "elasticity_unit": r.get("elasticity_unit"),
+        "unit_source": r.get("unit_source"),
+        "specification_status": r.get("specification_status"),
+        "baseline_evidence": r.get("baseline_evidence"),
+        "model_type": r.get("model_type"),
+        "countries_region": r.get("countries_region"),
+        "time_period_start": tp.get("start") if isinstance(tp, dict) else None,
+        "time_period_end": tp.get("end") if isinstance(tp, dict) else None,
+        "frequency": r.get("frequency"),
+        "n_obs": r.get("n_obs"),
+        "n_units": r.get("n_units"),
+        "data_source": r.get("data_source"),
+        "source_type": r.get("source_type"),
+        "source_row": loc.get("row") if isinstance(loc, dict) else None,
+        "source_column": loc.get("column") if isinstance(loc, dict) else None,
+        "source_page": loc.get("page") if isinstance(loc, dict) else None,
+        "table_complete": r.get("table_complete"),
+        "pages_used": ";".join(str(p) for p in pages) if pages else None,
+        "requires_review": r.get("requires_review"),
+        "review_reason": "; ".join(str(x) for x in reasons) if reasons else None,
+        "manually_edited": r.get("manually_edited"),
+        "manually_added": r.get("manually_added"),
+    }
+
+
+@app.route("/api/main-ai/records.csv", methods=["GET"])
+def main_ai_records_csv():
+    """Download extraction results as CSV. Honors the same filters as the
+    Main AI table toolbar: ``?paper_id=`` and ``?review_only=1``."""
+    records = _load_json(OUTPUT_DIR / "records.json", [])
+    paper_id = (request.args.get("paper_id") or "").strip()
+    review_only = request.args.get("review_only") in ("1", "true", "yes")
+    if paper_id:
+        records = [r for r in records if r.get("paper_id") == paper_id]
+    if review_only:
+        records = [r for r in records if r.get("requires_review")]
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=_CSV_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for r in records:
+        writer.writerow(_record_to_csv_row(r))
+
+    project = _get_active_project_id()
+    filename = f"metaextract_{project}_records.csv"
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # Which enum fields validate against which vocab — mirrors the same
@@ -1601,116 +1496,17 @@ def main_ai_dedupe():
     return jsonify({"removed": removed, "records": len(deduped)})
 
 
-_EXTRACT_THREAD_LOCK = threading.Lock()
-
-
-def _run_extraction_job(output_dir: Path, all_chunks: list, extractable: list,
-                         targets: dict, ontology: dict, cfg, abstracts: dict,
-                         paper_metadata: dict) -> None:
-    """Runs the Stage 4 extraction loop in a background thread so the HTTP
-    request that kicks it off can return immediately. This is the fix for
-    "Extraction failed — check the server log" reports where the run stops
-    partway through: the old code ran this entire loop synchronously inside
-    a single request, so on a large corpus with the (usually slower,
-    thinking-capable) main model, the request could run long enough for
-    nginx's or gunicorn's timeout to kill the connection mid-run — the
-    browser then sees a dead/non-JSON response and throws, even though the
-    backend was still working. Progress (and partial records/chunks) were
-    always saved incrementally, which is why clicking "run extraction" again
-    resumed instead of restarting — that resume behavior is preserved as-is;
-    only the blocking-request part is fixed here.
-    """
-    llm = LLMClient(cfg)
-    SAVE_EVERY = 3
-    extracted_chunks = 0
-    total = len(extractable)
-    records = _load_json(output_dir / "records.json", [])
-    progress = dict(_EXTRACT_PROGRESS_DEFAULT)
-    progress.update(
-        running=True, paper_id=extractable[0]["paper_id"] if extractable else None,
-        chunk_index=0, total=total, extracted=0, records_found=len(records), error=None,
-    )
-    _write_progress("extract", progress)
-    try:
-        for i, c in enumerate(extractable):
-            progress["paper_id"] = c["paper_id"]
-            progress["chunk_index"] = i + 1
-            _write_progress("extract", progress)
-            screening = {
-                "labels": c.get("labels") or ([c["chunk_type"]] if c.get("chunk_type") else []),
-                "primary": c.get("chunk_type"),
-                "classification_confidence": c.get("classification_confidence"),
-                "keep_classification": c.get("keep_classification"),
-                "detected": c.get("detected"),
-                "detection_confidence": c.get("detection_confidence"),
-                "target_match": c.get("target_match"),
-                "keep_reason": c.get("keep_reason"),
-            }
-            try:
-                raw_estimates = llm.extract(
-                    c["text"], targets, ontology,
-                    abstract=abstracts.get(c["paper_id"]),
-                    screening=screening,
-                )
-            except Exception as e:
-                _save_kept_chunks(all_chunks)
-                (output_dir / "records.json").write_text(json.dumps(records, indent=2))
-                progress["error"] = str(e)
-                progress["running"] = False
-                _write_progress("extract", progress)
-                return
-
-            # Drop any earlier records sourced from this exact chunk before
-            # adding fresh ones, so re-running extraction over an
-            # already-processed chunk never duplicates rows.
-            records = [r for r in records if r.get("source_chunk_id") != c["chunk_id"]]
-            for idx, raw in enumerate(raw_estimates or []):
-                records.append(_record_from_estimate(raw, c, idx, paper_metadata.get(c["paper_id"])))
-
-            c["extraction_done"] = True
-            extracted_chunks += 1
-            progress["extracted"] = extracted_chunks
-            progress["records_found"] = len(records)
-            if (i + 1) % SAVE_EVERY == 0:
-                _save_kept_chunks(all_chunks)
-                (output_dir / "records.json").write_text(json.dumps(records, indent=2))
-                _write_progress("extract", progress)
-
-        # Text and a table chunk from the same paper can each independently
-        # yield a record for the same real estimate at different precision
-        # (see _dedupe_rounded_records) — clean that up across the whole
-        # merged set now that every chunk has been processed, not per-chunk.
-        records, deduped_count = _dedupe_rounded_records(records)
-
-        _save_kept_chunks(all_chunks)
-        (output_dir / "records.json").write_text(json.dumps(records, indent=2))
-        progress["duplicates_removed"] = deduped_count
-        # No explicit "mark done" needed — _load_state() recomputes
-        # main_ai_done directly from the 'extraction_done' fields just written.
-    finally:
-        progress["running"] = False
-        _write_progress("extract", progress)
-
-
 @app.route("/api/main-ai/extract", methods=["POST"])
 def main_ai_extract():
-    """Kick off Stage 4 extraction (the main/expensive AI) over every chunk
-    Stage 3 detection said yes to. Refuses to run (400) if the main AI's API
-    key isn't set or the extraction prompt is blank. The paper-metadata pass
-    (Stage 4a) is skipped silently (not an error) if its own prompt is blank
-    — extraction still works fine without it, just leaves paper-level fields
-    null unless a specific chunk states them.
+    """Start Stage 4 extraction as a durable background job.
 
-    Runs the actual extraction loop in a background thread (see
-    _run_extraction_job) rather than blocking this request until every chunk
-    is done — a large corpus with a slow/thinking-capable main model can take
-    long enough that a synchronous request gets killed by a proxy or worker
-    timeout partway through. The frontend already polls
-    /api/main-ai/extract/progress for the progress bar, so it also uses that
-    to detect completion now instead of waiting on this response.
+    Returns immediately with ``{started: true, total}``. Poll
+    ``/api/main-ai/extract/progress`` until ``running`` is false. Paper
+    metadata (Stage 4a) runs inside the job process — not this request —
+    so a slow main model can't time out the start POST. Refuses (400) if
+    the main AI's API key isn't set or the extraction prompt is blank.
     """
-    all_chunks = _kept_chunks()
-    extractable = _extractable_chunks(all_chunks)
+    extractable = _extractable_chunks(_kept_chunks())
     if not extractable:
         return jsonify({"error": "no chunks have passed detection yet — run Detection AI first"}), 400
 
@@ -1718,46 +1514,15 @@ def main_ai_extract():
     if err:
         return jsonify({"error": err}), 400
 
-    with _EXTRACT_THREAD_LOCK:
-        current = _read_progress("extract", _EXTRACT_PROGRESS_DEFAULT)
-        if current.get("running"):
-            return jsonify({"error": "an extraction run is already in progress"}), 409
-
-        targets = _load_json(TARGETS_PATH, {})
-        ontology = _load_json(ONTOLOGY_PATH, {})
-        cfg = settings_store.load_model_config()
-        llm = LLMClient(cfg)
-
-        abstracts = _abstracts_by_paper()
-        methodology_text = _methodology_text_by_paper(all_chunks)
-        paper_metadata_prompt = prompts_store.load().get("paper_metadata", {})
-        paper_metadata_configured = bool(
-            paper_metadata_prompt.get("system", "").strip() or paper_metadata_prompt.get("user", "").strip()
+    project_id = _get_active_project_id()
+    try:
+        stage_jobs.start_job(
+            project_id, "extract",
+            total=len(extractable),
+            paper_id=extractable[0]["paper_id"],
         )
-        paper_metadata: dict = {}
-        if paper_metadata_configured:
-            for paper_id in sorted({c["paper_id"] for c in extractable}):
-                try:
-                    meta = llm.extract_paper_metadata(abstracts.get(paper_id), methodology_text.get(paper_id, ""))
-                except Exception:
-                    meta = None
-                if meta:
-                    paper_metadata[paper_id] = meta
-
-        # Mark as running immediately (before the thread starts) so a second
-        # click, or a second gunicorn worker handling it, sees it as busy
-        # right away instead of racing the thread's own first write.
-        starting_progress = dict(_EXTRACT_PROGRESS_DEFAULT)
-        starting_progress.update(running=True, total=len(extractable), paper_id=extractable[0]["paper_id"])
-        _write_progress("extract", starting_progress)
-
-        thread = threading.Thread(
-            target=_run_extraction_job,
-            args=(OUTPUT_DIR, all_chunks, extractable, targets, ontology, cfg, abstracts, paper_metadata),
-            daemon=True,
-        )
-        thread.start()
-
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 409
     return jsonify({"started": True, "total": len(extractable)})
 
 
@@ -1966,13 +1731,12 @@ def paper_thumbnail(paper_id):
 
 
 if __name__ == "__main__":
-    # threaded=True is required here: the classify endpoint blocks for the
-    # whole run (one request per chunk to the LLM), so pause/resume/progress
-    # requests need to be served concurrently on a separate thread rather
-    # than queuing behind it.
     # host="0.0.0.0" is required for any non-local deployment (a droplet, a
     # VM, a container) — Flask's default host is 127.0.0.1, which only
     # accepts connections from inside the machine itself. Left unset, the
     # app runs fine over SSH-local testing but is completely unreachable
     # from a browser hitting the server's public IP.
+    # threaded=True still helps for concurrent progress polls / pause clicks
+    # while other short requests are in flight; the long AI stages themselves
+    # now run in detached subprocesses (see stage_jobs), not in request threads.
     app.run(host="0.0.0.0", debug=True, port=5050, threaded=True)

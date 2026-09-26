@@ -1,5 +1,4 @@
 const paperFilter = document.getElementById('paper-filter');
-const reviewOnlyFilter = document.getElementById('review-only-filter');
 const recordsCount = document.getElementById('records-count');
 const recordsTbody = document.getElementById('records-tbody');
 const recordsEmpty = document.getElementById('records-empty');
@@ -11,11 +10,14 @@ const extractProgressFill = document.getElementById('extract-progress-fill');
 const extractProgressLabel = document.getElementById('extract-progress-label');
 const addRowBtn = document.getElementById('add-row-btn');
 const dedupeBtn = document.getElementById('dedupe-btn');
+const downloadCsvBtn = document.getElementById('download-csv-btn');
 
 let allRecords = [];
 let expandedId = null;
 let editingId = null;
 let editDraft = null;
+let sortKey = 'paper_id';
+let sortDir = 'asc'; // 'asc' | 'desc'
 
 // Data-driven edit form — one entry per plain scalar field the user can
 // correct directly. Composite fields (confidence_interval, time_period,
@@ -104,10 +106,46 @@ async function loadRecords() {
 }
 
 function matchingRecords() {
-  return allRecords.filter(r => {
+  const rows = allRecords.filter(r => {
     if (paperFilter.value && r.paper_id !== paperFilter.value) return false;
-    if (reviewOnlyFilter.checked && !r.requires_review) return false;
     return true;
+  });
+  return sortRecords(rows);
+}
+
+function sortValue(r, key) {
+  if (key === 'requires_review') return r.requires_review ? 1 : 0;
+  const v = r[key];
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return v;
+  const n = Number(v);
+  if (key === 'coefficient' || key === 'standard_error') {
+    return Number.isNaN(n) ? null : n;
+  }
+  return String(v).toLowerCase();
+}
+
+function sortRecords(rows) {
+  const dir = sortDir === 'desc' ? -1 : 1;
+  return [...rows].sort((a, b) => {
+    const av = sortValue(a, sortKey);
+    const bv = sortValue(b, sortKey);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;   // nulls last
+    if (bv == null) return -1;
+    if (av < bv) return -1 * dir;
+    if (av > bv) return 1 * dir;
+    // Stable-ish tie-break so re-sorts don't jump around
+    return String(a.estimate_id || '').localeCompare(String(b.estimate_id || ''));
+  });
+}
+
+function updateSortHeaders() {
+  document.querySelectorAll('.records-table th.sortable').forEach(th => {
+    const active = th.dataset.sort === sortKey;
+    th.classList.toggle('sort-active', active);
+    th.dataset.dir = active ? sortDir : '';
+    th.setAttribute('aria-sort', active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none');
   });
 }
 
@@ -294,7 +332,7 @@ function editRow(r) {
       <input type="text" class="edit-input" data-field="row_label" value="${escapeHtml(editDraft.row_label ?? '')}" placeholder="row" style="width:48%">
       <input type="text" class="edit-input" data-field="column_label" value="${escapeHtml(editDraft.column_label ?? '')}" placeholder="column" style="width:48%">
     </div>`;
-  return `<tr class="record-detail-row editing"><td colspan="17">
+  return `<tr class="record-detail-row editing"><td colspan="16">
       <div class="record-detail-grid">${fieldsHtml}${compositeHtml}</div>
       <div class="record-edit-actions">
         <button class="btn-primary" data-action="save" data-id="${escapeHtml(r.estimate_id)}">Save</button>
@@ -328,11 +366,12 @@ function detailRow(r) {
   const cells = items.map(([label, val]) =>
     `<div class="record-detail-item"><div class="record-detail-label">${escapeHtml(label)}</div><div class="record-detail-value">${escapeHtml(val)}</div></div>`
   ).join('');
-  return `<tr class="record-detail-row"><td colspan="17"><div class="record-detail-grid">${cells}</div></td></tr>`;
+  return `<tr class="record-detail-row"><td colspan="16"><div class="record-detail-grid">${cells}</div></td></tr>`;
 }
 
 function renderTable() {
   const records = matchingRecords();
+  updateSortHeaders();
   recordsCount.textContent = `${records.length} of ${allRecords.length} record${allRecords.length === 1 ? '' : 's'}`;
   recordsTableWrap.querySelector('table').hidden = records.length === 0 && allRecords.length === 0;
   recordsEmpty.hidden = allRecords.length !== 0;
@@ -355,7 +394,7 @@ function renderTable() {
     const rowHtml = `
       <tr class="record-row ${expandedId === r.estimate_id ? 'expanded' : ''} ${isEditing ? 'editing' : ''}" data-id="${escapeHtml(r.estimate_id)}">
         <td class="record-expand">${expandedId === r.estimate_id ? '▾' : '▸'}</td>
-        <td class="mono">${escapeHtml(r.paper_id)}</td>
+        <td class="mono record-paper" title="${escapeHtml(r.paper_id)}">${escapeHtml(r.paper_id)}</td>
         <td>${escapeHtml(r.target_elasticity_type) || '–'}</td>
         <td>${escapeHtml(r.target_product) || '–'}</td>
         <td>${r.target_food_group ? `<span class="chunk-tag match">${escapeHtml(r.target_food_group)}</span>` : '–'}</td>
@@ -364,15 +403,18 @@ function renderTable() {
         <td class="record-wording">${escapeHtml(r.paper_product_wording_raw) || '–'}</td>
         <td>${matchBadge}</td>
         <td>${escapeHtml(r.variable_role) || '–'}</td>
-        <td>${escapeHtml(r.estimate_type) || '–'}</td>
         <td class="mono">${fmtCoef(r.coefficient)}</td>
         <td class="mono">${fmtCoef(r.standard_error)}</td>
         <td class="mono">${sig || '–'}</td>
         <td>${escapeHtml(r.specification_status) || '–'}</td>
         <td><div class="review-cell">${reviewBadge}${editedBadge}</div></td>
         <td class="record-actions">
-          <button class="chunk-override-btn" data-action="edit" data-id="${escapeHtml(r.estimate_id)}">${isEditing ? 'Editing…' : 'Edit'}</button>
-          <button class="chunk-override-btn drop" data-action="delete" data-id="${escapeHtml(r.estimate_id)}">Delete</button>
+          <button type="button" class="icon-btn" data-action="edit" data-id="${escapeHtml(r.estimate_id)}" title="${isEditing ? 'Editing…' : 'Edit'}" aria-label="${isEditing ? 'Editing' : 'Edit'}">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 20h9" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <button type="button" class="icon-btn danger" data-action="delete" data-id="${escapeHtml(r.estimate_id)}" title="Delete" aria-label="Delete">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 6h18" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/><path d="M8 6V4h8v2" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 6l-1 14H6L5 6" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>
+          </button>
         </td>
       </tr>`;
     if (isEditing) return rowHtml + editRow(r);
@@ -416,9 +458,29 @@ function renderTable() {
 }
 
 paperFilter.addEventListener('change', renderTable);
-reviewOnlyFilter.addEventListener('change', renderTable);
 addRowBtn.addEventListener('click', addRow);
 dedupeBtn.addEventListener('click', dedupeRows);
+
+document.querySelectorAll('.records-table th.sortable').forEach(th => {
+  th.addEventListener('click', () => {
+    const key = th.dataset.sort;
+    if (sortKey === key) {
+      sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+    } else {
+      sortKey = key;
+      // Numbers default high→low (largest coef first); text A→Z
+      sortDir = (key === 'coefficient' || key === 'standard_error') ? 'desc' : 'asc';
+    }
+    renderTable();
+  });
+});
+
+downloadCsvBtn.addEventListener('click', () => {
+  const params = new URLSearchParams();
+  if (paperFilter.value) params.set('paper_id', paperFilter.value);
+  const qs = params.toString();
+  window.location.href = `/api/main-ai/records.csv${qs ? `?${qs}` : ''}`;
+});
 
 function showProgressBar() {
   extractProgress.hidden = false;
@@ -430,12 +492,34 @@ function hideProgressBar() {
   extractProgress.hidden = true;
 }
 
-// Extraction now runs in a background thread on the server (see app.py) so
-// the POST below only starts the job and returns immediately -- the actual
-// work is tracked by polling /progress until it reports running:false. This
-// avoids the run being killed by a proxy/timeout partway through on large
-// corpora with a slow main model, which used to surface as "Extraction
-// failed -- check the server log" even though the backend was still working.
+function applyExtractProgress(p) {
+  const done = p.completed != null ? p.completed : p.extracted;
+  const pct = p.total ? Math.round(100 * done / p.total) : 0;
+  extractProgressFill.style.width = `${pct}%`;
+  extractProgressLabel.textContent = p.paper_id
+    ? `Working on "${p.paper_id}" — ${done}/${p.total} completed (${p.records_found} records so far) — ${pct}%`
+    : `${done}/${p.total} completed (${p.records_found} records so far) — ${pct}%`;
+  extractStatus.textContent = `Extracting… ${done}/${p.total} chunks done`;
+  extractStatus.classList.add('busy');
+}
+
+function finishExtractUI(finalProgress) {
+  hideProgressBar();
+  if (finalProgress.error) {
+    extractStatus.textContent = `${finalProgress.error} (${finalProgress.extracted}/${finalProgress.total} chunks completed before the error — already-extracted chunks won't be redone if you retry).`;
+  } else {
+    const dupNote = finalProgress.duplicates_removed
+      ? ` (removed ${finalProgress.duplicates_removed} rounded duplicate${finalProgress.duplicates_removed === 1 ? '' : 's'})`
+      : '';
+    extractStatus.textContent = `Extracted ${finalProgress.extracted} of ${finalProgress.total} chunks — ${finalProgress.records_found} record${finalProgress.records_found === 1 ? '' : 's'} total${dupNote}.`;
+  }
+  extractStatus.classList.remove('busy');
+  extractBtn.disabled = false;
+}
+
+// Extraction runs in a detached subprocess (see stage_jobs / job_runner).
+// POST only starts the job; progress file is the source of truth — poll
+// until running:false. Survives proxy timeouts and model latency changes.
 async function pollUntilExtractionDone() {
   for (;;) {
     let p;
@@ -447,15 +531,31 @@ async function pollUntilExtractionDone() {
       await new Promise(r => setTimeout(r, 1500));
       continue;
     }
-    const pct = p.total ? Math.round(100 * p.chunk_index / p.total) : 0;
-    extractProgressFill.style.width = `${pct}%`;
-    extractProgressLabel.textContent = p.paper_id
-      ? `Working on "${p.paper_id}" — chunk ${p.chunk_index}/${p.total} (${p.records_found} records so far) — ${pct}%`
-      : `Chunk ${p.chunk_index}/${p.total} (${p.records_found} records so far) — ${pct}%`;
-    extractStatus.textContent = `Extracting… ${p.extracted}/${p.total} chunks done`;
+    applyExtractProgress(p);
     await Promise.all([loadPapers(), loadRecords()]);
     if (!p.running) return p;
     await new Promise(r => setTimeout(r, 1500));
+  }
+}
+
+// Attach to a job that's already running (page reload, or a second click
+// that got 409). Shows the progress bar and polls until done — otherwise
+// the bar stays hidden and the user only sees "already in progress".
+async function attachToRunningExtraction() {
+  extractBtn.disabled = true;
+  showProgressBar();
+  extractStatus.textContent = 'Extracting…';
+  extractStatus.classList.add('busy');
+  try {
+    const finalProgress = await pollUntilExtractionDone();
+    finishExtractUI(finalProgress);
+    await Promise.all([loadPapers(), loadRecords()]);
+  } catch (e) {
+    hideProgressBar();
+    extractStatus.textContent = 'Extraction failed — check the server log.';
+    extractStatus.classList.remove('busy');
+    extractBtn.disabled = false;
+    await Promise.all([loadPapers(), loadRecords()]);
   }
 }
 
@@ -468,6 +568,14 @@ extractBtn.addEventListener('click', async () => {
     const res = await fetch('/api/main-ai/extract', { method: 'POST' });
     const data = await res.json();
     if (!res.ok) {
+      // 409 = durable job already running — attach to it instead of failing
+      // with a stuck "already in progress" and no progress bar.
+      if (res.status === 409) {
+        const finalProgress = await pollUntilExtractionDone();
+        finishExtractUI(finalProgress);
+        await Promise.all([loadPapers(), loadRecords()]);
+        return;
+      }
       hideProgressBar();
       extractStatus.textContent = data.error || 'Extraction failed.';
       extractStatus.classList.remove('busy');
@@ -476,24 +584,15 @@ extractBtn.addEventListener('click', async () => {
       return;
     }
     const finalProgress = await pollUntilExtractionDone();
-    hideProgressBar();
-    if (finalProgress.error) {
-      extractStatus.textContent = `${finalProgress.error} (${finalProgress.extracted}/${finalProgress.total} chunks completed before the error — already-extracted chunks won't be redone if you retry).`;
-    } else {
-      const dupNote = finalProgress.duplicates_removed
-        ? ` (removed ${finalProgress.duplicates_removed} rounded duplicate${finalProgress.duplicates_removed === 1 ? '' : 's'})`
-        : '';
-      extractStatus.textContent = `Extracted ${finalProgress.extracted} of ${finalProgress.total} chunks — ${finalProgress.records_found} record${finalProgress.records_found === 1 ? '' : 's'} total${dupNote}.`;
-    }
-    extractStatus.classList.remove('busy');
+    finishExtractUI(finalProgress);
     await Promise.all([loadPapers(), loadRecords()]);
   } catch (e) {
     hideProgressBar();
     extractStatus.textContent = 'Extraction failed — check the server log.';
     extractStatus.classList.remove('busy');
+    extractBtn.disabled = false;
     await Promise.all([loadPapers(), loadRecords()]);
   }
-  extractBtn.disabled = false;
 });
 
 async function loadFoodGroups() {
@@ -510,6 +609,17 @@ async function loadFoodGroups() {
   }
 }
 
+async function resumeExtractionIfRunning() {
+  try {
+    const res = await fetch('/api/main-ai/extract/progress');
+    const p = await res.json();
+    if (p.running) await attachToRunningExtraction();
+  } catch (e) {
+    // ignore — page still usable; user can click Run
+  }
+}
+
 loadFoodGroups();
 loadPapers();
 loadRecords();
+resumeExtractionIfRunning();

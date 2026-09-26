@@ -19,7 +19,7 @@ import json
 import re
 from typing import Any, Dict, Optional
 
-from .config import AIModelConfig, ModelConfig, effort_levels_for, provider_for
+from .config import AIModelConfig, ModelConfig, effort_levels_for, extraction_max_tokens_for, provider_for
 from . import prompts
 
 
@@ -30,15 +30,16 @@ class LLMClient:
         # created — each slot can carry its own API key and even its own
         # provider, so they can't safely share a single client instance.
         self._clients: Dict[str, Any] = {}
-        # Last raw model text seen by classify_chunk/detect_estimate, kept
-        # around purely for post-mortem debugging when parsing fails — see
-        # the comment on the max_tokens bump in classify_chunk for why an
+        # Last raw model text seen by classify_chunk/detect_estimate/extract,
+        # kept around purely for post-mortem debugging when parsing fails —
+        # see the comment on the max_tokens bump in classify_chunk for why an
         # empty/truncated response happens in the first place. Callers that
         # want to know *why* a None came back can read this right after the
         # call; it's overwritten on every call, so it's only meaningful
         # immediately after the call that produced it.
         self.last_classify_raw: Optional[str] = None
         self.last_detect_raw: Optional[str] = None
+        self.last_extract_raw: Optional[str] = None
 
     # ----- low level: client construction, one branch per provider -----
     def _ensure_client(self, stage: AIModelConfig):
@@ -366,6 +367,23 @@ class LLMClient:
         "literature_relevant_context", "literature_estimate_only",
         "off_target", "no_estimate_signal",
     )
+    # keep_reason is the authoritative keep/discard signal. Models sometimes
+    # emit inconsistent pairs (e.g. detected=false with
+    # contains_model_specification_for_target_estimate) because the prompt
+    # also talks about "reportable numbers"; when that happens, trusting the
+    # boolean alone drops methodology/definition context that Stage 4 needs.
+    # These three reasons mean discard; every other _KEEP_REASONS value means
+    # keep — same rule the Detection AI manual-override dropdown uses.
+    _DISCARD_KEEP_REASONS = (
+        "off_target",
+        "no_estimate_signal",
+        "literature_estimate_only",  # other paper's estimate — not ours
+    )
+
+    @classmethod
+    def detected_from_keep_reason(cls, keep_reason: str) -> bool:
+        """Map a validated keep_reason onto the keep/discard boolean."""
+        return keep_reason not in cls._DISCARD_KEEP_REASONS
 
     @classmethod
     def _parse_variable_match(cls, raw_match: Any) -> Optional[Dict[str, Any]]:
@@ -400,7 +418,13 @@ class LLMClient:
         a usable {"detected", "confidence"} result rather than nothing at
         all. Falls back to a plain yes/no substring search (the pre-JSON
         behavior) if strict parsing fails or the model only returns a bare
-        word."""
+        word.
+
+        When keep_reason is present and valid, it wins over the model's
+        detected boolean (see _DISCARD_KEEP_REASONS) — that is what stops
+        methodology/definition chunks from being dropped after the model
+        correctly labels them with a keep-style reason but sets detected
+        false because no coefficient appears in the excerpt."""
         if not raw:
             return None
         parsed = cls._parse_json(raw)
@@ -408,8 +432,9 @@ class LLMClient:
         confidence = None
         target_match = None
         keep_reason = None
-        if isinstance(parsed, dict) and isinstance(parsed.get("detected"), bool):
-            detected = parsed["detected"]
+        if isinstance(parsed, dict):
+            if isinstance(parsed.get("detected"), bool):
+                detected = parsed["detected"]
             raw_conf = parsed.get("confidence")
             if isinstance(raw_conf, str) and raw_conf.strip().lower() in cls._CONFIDENCE_LEVELS:
                 confidence = raw_conf.strip().lower()
@@ -431,6 +456,10 @@ class LLMClient:
             raw_reason = parsed.get("keep_reason")
             if isinstance(raw_reason, str) and raw_reason.strip().lower() in cls._KEEP_REASONS:
                 keep_reason = raw_reason.strip().lower()
+                # Authoritative: reason decides keep/discard even if the
+                # model contradicted itself on the detected field.
+                detected = cls.detected_from_keep_reason(keep_reason)
+
         if detected is None:
             lowered = raw.strip().lower()
             if "true" in lowered or lowered.startswith("yes") or " yes" in lowered:
@@ -656,13 +685,21 @@ class LLMClient:
         system, user = prompts.paper_metadata_prompt(abstract, methodology_text)
         if self._prompt_blank(system, user):
             return None
-        out = self._call(self.cfg.main, system, user, max_tokens=400)
+        # Same thinking-vs-cap issue as extract(), but the JSON is tiny — reserve
+        # ~1k for the answer and let extraction_max_tokens_for scale the rest,
+        # floored at 4k so low-effort still has room.
+        meta_tokens = min(
+            16_000,
+            extraction_max_tokens_for(self.cfg.main, floor=4_000),
+        )
+        out = self._call(self.cfg.main, system, user, max_tokens=meta_tokens)
         return self._parse_paper_metadata_result(out)
 
     # ----- Stage 4: extraction (main) -----
     def extract(self, chunk_text: str, targets: dict, ontology: dict,
                 abstract: Optional[str] = None,
-                screening: Optional[Dict[str, Any]] = None) -> Optional[list]:
+                screening: Optional[Dict[str, Any]] = None,
+                max_tokens: Optional[int] = None) -> Optional[list]:
         """Returns a list of zero or more estimate dicts (see
         _parse_extraction_result), or None if the prompt is blank or nothing
         parseable came back at all.
@@ -670,11 +707,21 @@ class LLMClient:
         `screening` bundles Stage 2's classification AND Stage 3's detection
         output for this same chunk (labels, target_match, keep_reason, etc.)
         — handed over as prior-screening context, same reasoning as Stage 3
-        receiving Stage 2's classification."""
+        receiving Stage 2's classification.
+
+        max_tokens defaults to extraction_max_tokens_for(main): a floor for
+        non-thinking models, scaled up by the main slot's effort so Opus /
+        high–max Sonnet don't silently truncate to an empty response when
+        reasoning eats the budget before any JSON is written."""
         system, user = prompts.extraction_prompt(chunk_text, targets, ontology, abstract, screening)
         if self._prompt_blank(system, user):
             return None
-        out = self._call(self.cfg.main, system, user)
+        tokens = (
+            max_tokens if max_tokens is not None
+            else extraction_max_tokens_for(self.cfg.main, self.cfg.extraction_max_tokens)
+        )
+        out = self._call(self.cfg.main, system, user, max_tokens=tokens)
+        self.last_extract_raw = out
         return self._parse_extraction_result(out)
 
     # ----- Stage 5: validation -----

@@ -33,6 +33,55 @@ Prior work by earlier authors discussed related mechanisms at length without
 providing new estimates.
 """
 
+# Flattened OCR-style table: each cell is its own short paragraph (no pipes).
+# Must stay ONE chunk — headers + coefficients together — or detection fails.
+FLATTENED_TABLE_MD = """
+# Results
+
+Estimates are reported below.
+
+Table 2. Seemingly unrelated regression parameter estimate for share equations
+
+Output Share Equations
+
+Cereals
+
+Pulses
+
+Fruits &
+Vegetables
+0.041***
+(5.58)
+
+Animal
+Products
+0.009
+(0.68)
+
+Explanatory
+Variables
+
+Constant
+
+-0.516
+
+0.139
+
+Time
+
+0.005***
+(3.65)
+
+-0.031***
+(-4.54)
+
+System R2
+Note: values in parentheses are t-statistics.
+
+Discussion of the results continues here with a long prose paragraph that
+should not be absorbed into the table body itself.
+"""
+
 
 def main():
     paper = ParsedPaper(paper_id="sample01", source_path="n/a", markdown=SAMPLE_MD)
@@ -52,6 +101,22 @@ def main():
     assert "Column 3" in table_chunk.text, "preceding context lost"
     assert "preferred IV specification" in table_chunk.text, "following context lost"
     print("OK: table chunk preserved headers, metadata, and surrounding context")
+
+    flat_paper = ParsedPaper(paper_id="flat01", source_path="n/a", markdown=FLATTENED_TABLE_MD)
+    flat_chunks = stage3_chunk.chunk_paper(flat_paper, cfg)
+    flat_tables = [c for c in flat_chunks if c.contains_table]
+    assert len(flat_tables) >= 1, f"expected flattened table chunk(s), got {len(flat_tables)}"
+    # Caption + coefficients must share one chunk (the failure mode was
+    # headers in chunk A and bare numbers in chunk B).
+    ft = next(c for c in flat_tables if "Table 2. Seemingly" in c.text)
+    assert "0.041***" in ft.text and "(5.58)" in ft.text and "System R2" in ft.text
+    assert ft.text.index("Table 2. Seemingly") < ft.text.index("0.041***")
+    orphan_coef_chunks = [
+        c for c in flat_chunks
+        if c is not ft and "0.041***" in c.text and "Table 2. Seemingly" not in c.text
+    ]
+    assert not orphan_coef_chunks, "flattened table coefficients were split from their caption"
+    print("OK: flattened OCR-style table kept as one atomic chunk")
 
     # consistency validator
     rec = ExtractionRecord(paper_id="sample01", estimate_id="c001")

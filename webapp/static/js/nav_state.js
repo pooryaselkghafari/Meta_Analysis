@@ -59,7 +59,7 @@
       return; // leave the switcher blank if the endpoint is unreachable
     }
     const select = document.createElement("select");
-    select.className = "project-select mono";
+    select.className = "project-select";
     select.title = "Switch project — each project has its own papers, targets, and results";
     (data.projects || []).forEach(p => {
       const opt = document.createElement("option");
