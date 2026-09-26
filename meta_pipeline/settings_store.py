@@ -136,4 +136,5 @@ def save(payload: Dict[str, Any]) -> None:
 
         if "effort" in incoming:
             existing[slot]["effort"] = incoming["effort"] or ""
+    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(existing, indent=2))

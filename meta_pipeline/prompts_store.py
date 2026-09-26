@@ -80,6 +80,7 @@ def save(payload: Dict[str, Any]) -> None:
             existing[stage]["system"] = incoming["system"] or ""
         if "user" in incoming:
             existing[stage]["user"] = incoming["user"] or ""
+    PROMPTS_PATH.parent.mkdir(parents=True, exist_ok=True)
     PROMPTS_PATH.write_text(json.dumps(existing, indent=2))
 
 

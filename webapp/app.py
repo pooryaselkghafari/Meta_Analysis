@@ -187,6 +187,20 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB total upload cap
 
 
+@app.before_request
+def _rebind_active_project():
+    """Every request re-reads active_project.json and repoints path globals.
+
+    Required under multi-worker gunicorn: ``set_base_dir`` only updates the
+    worker that handled create/activate. Without this, Settings save can
+    write ``ai_settings.json`` / ``prompts_settings.json`` under one path
+    while Cheap/Main AI readiness on another worker reads a different
+    (empty) file — keys look unset and a second Save from a blank UI wipe
+    the real prompts.
+    """
+    _apply_active_project()
+
+
 @app.route("/api/projects", methods=["GET"])
 def api_list_projects():
     return jsonify({"projects": _list_projects(), "active_project_id": _get_active_project_id()})
