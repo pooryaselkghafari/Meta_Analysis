@@ -57,7 +57,11 @@ class LLMClient:
                 import anthropic
             except ImportError as e:
                 raise RuntimeError("anthropic package not installed (pip install anthropic)") from e
-            client = anthropic.Anthropic(api_key=stage.api_key)
+            # Long extract calls (high max_tokens + thinking/effort) can run
+            # well past the SDK's default ~10 minute timeout. Streaming keeps
+            # the connection alive; a generous read timeout covers wall-clock
+            # wait between stream events.
+            client = anthropic.Anthropic(api_key=stage.api_key, timeout=3600.0)
         elif provider == "openai":
             try:
                 import openai
@@ -139,7 +143,18 @@ class LLMClient:
             kwargs["temperature"] = self.cfg.temperature
         if effort:
             kwargs["output_config"] = {"effort": effort}
-        resp = self._call_with_kwarg_fallback(client.messages.create, kwargs)
+
+        # Anthropic rejects non-streaming creates when the call *may* take
+        # longer than ~10 minutes (high max_tokens and/or thinking). Always
+        # stream and assemble the final message — short classify/detect calls
+        # behave the same; long Stage 4 extracts no longer die with
+        # "Streaming is required for operations that may take longer than
+        # 10 minutes".
+        def _stream_once(**kw):
+            with client.messages.stream(**kw) as stream:
+                return stream.get_final_message()
+
+        resp = self._call_with_kwarg_fallback(_stream_once, kwargs)
         return "".join(
             block.text for block in resp.content if getattr(block, "type", None) == "text"
         )
