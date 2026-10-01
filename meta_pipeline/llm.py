@@ -538,14 +538,36 @@ class LLMClient:
     )
     _SOURCE_TYPES = ("table", "text", "figure")
     _TEST_STAT_TYPES = ("t", "z", "chi2", "f", "other")
-    # Standard 8-group food classification (mirrors models.FoodGroup exactly)
-    # — kept Title Case here, unlike the other enums above, since these are
-    # meant as human-readable display values (table columns, regression/
-    # dashboard labels), not internal machine tokens.
+    # Chen et al. (2016) nine product groups (mirrors models.FoodGroup).
+    # Title Case — human-readable display values for tables / dashboard.
     _FOOD_GROUPS = (
-        "Bread and cereals", "Meat", "Fish and seafood", "Dairy products",
-        "Fats and oils", "Fruit and vegetables", "Beverages and tobacco",
-        "Other food products",
+        "Grains and vegetables", "Meat and eggs", "Edible oil",
+        "Aquatic products", "Fruits", "Sugar", "Dairy", "Tobacco", "Alcohol",
+    )
+    _DATA_LEVELS = ("household_individual", "aggregate")
+    _GEOGRAPHIC_SCOPES = ("national", "regional")
+    _URBAN_RURAL = ("both", "urban_only", "rural_only")
+    _DATA_TYPES = ("cross_section", "time_series", "pooled", "panel")
+    _PRICE_MEASURES = ("actual_prices", "unit_values")
+    _CONDITIONINGS = (
+        "unconditional", "conditional_food", "conditional_animal", "conditional_grain",
+    )
+    _BUDGETING_STAGES = ("single_stage", "multi_stage")
+    _DEMAND_SYSTEMS = (
+        "none", "les_qes", "aids", "quaids", "translog", "linquad", "rotterdam",
+    )
+    _ESTIMATION_METHODS = ("ols", "ml", "sur", "gls", "other")
+    _ELASTICITY_FORMS = ("marshallian", "hicksian", "both", "unknown")
+    _PUBLICATION_STATUSES = ("unpublished", "published")
+    _STUDY_LANGUAGES = ("english", "other")
+
+    # Paper-level Chen fields backfilled onto every estimate when the chunk
+    # didn't override them.
+    _CHEN_PAPER_FIELDS = (
+        "real_per_capita_income", "data_level", "geographic_scope", "urban_rural",
+        "data_type", "price_measure", "conditioning", "budgeting_stages",
+        "demand_system", "estimation_method", "demographic_controls",
+        "publication_status", "study_language", "n_products_in_demand_system",
     )
 
     @classmethod
@@ -554,6 +576,84 @@ class LLMClient:
             return None
         v = value.strip().lower()
         return v if v in allowed else None
+
+    @classmethod
+    def _clean_float(cls, value: Any) -> Optional[float]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    @classmethod
+    def _clean_int(cls, value: Any) -> Optional[int]:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value == int(value):
+            return int(value)
+        return None
+
+    @classmethod
+    def _clean_bool(cls, value: Any) -> Optional[bool]:
+        return value if isinstance(value, bool) else None
+
+    @classmethod
+    def _apply_chen_review_flags(cls, out: Dict[str, Any]) -> None:
+        """If income or budget share (or conditional group elasticities) are
+        missing, leave them null and mark the row for review with an explicit
+        reason — required for Chen conversions / meta-regression."""
+        # Drop prior auto-flags so a later backfill (e.g. paper-level income)
+        # can clear them; keep any human / model reasons that aren't ours.
+        auto = {
+            "missing real per capita income (not stated in paper)",
+            "missing budget share (not stated in paper)",
+            "missing group expenditure elasticity (needed for conditional→unconditional conversion)",
+            "missing group own-price elasticity (needed for conditional→unconditional conversion)",
+        }
+        reasons = [r for r in (out.get("review_reason") or []) if r not in auto]
+
+        def add(msg: str) -> None:
+            if msg not in reasons:
+                reasons.append(msg)
+
+        if out.get("real_per_capita_income") is None:
+            add("missing real per capita income (not stated in paper)")
+        if out.get("budget_share") is None:
+            add("missing budget share (not stated in paper)")
+        cond = out.get("conditioning")
+        if hasattr(cond, "value"):
+            cond = cond.value
+        if cond and cond != "unconditional":
+            if out.get("group_expenditure_elasticity") is None:
+                add("missing group expenditure elasticity (needed for conditional→unconditional conversion)")
+            if out.get("group_own_price_elasticity") is None:
+                add("missing group own-price elasticity (needed for conditional→unconditional conversion)")
+        out["review_reason"] = reasons
+        out["requires_review"] = bool(reasons)
+
+    @classmethod
+    def _parse_chen_fields(cls, raw: Dict[str, Any], out: Dict[str, Any]) -> None:
+        out["data_level"] = cls._clean_enum(raw.get("data_level"), cls._DATA_LEVELS)
+        out["geographic_scope"] = cls._clean_enum(raw.get("geographic_scope"), cls._GEOGRAPHIC_SCOPES)
+        out["urban_rural"] = cls._clean_enum(raw.get("urban_rural"), cls._URBAN_RURAL)
+        out["data_type"] = cls._clean_enum(raw.get("data_type"), cls._DATA_TYPES)
+        out["price_measure"] = cls._clean_enum(raw.get("price_measure"), cls._PRICE_MEASURES)
+        out["conditioning"] = cls._clean_enum(raw.get("conditioning"), cls._CONDITIONINGS)
+        out["budgeting_stages"] = cls._clean_enum(raw.get("budgeting_stages"), cls._BUDGETING_STAGES)
+        out["demand_system"] = cls._clean_enum(raw.get("demand_system"), cls._DEMAND_SYSTEMS)
+        out["estimation_method"] = cls._clean_enum(raw.get("estimation_method"), cls._ESTIMATION_METHODS)
+        out["elasticity_form"] = cls._clean_enum(raw.get("elasticity_form"), cls._ELASTICITY_FORMS)
+        out["publication_status"] = cls._clean_enum(raw.get("publication_status"), cls._PUBLICATION_STATUSES)
+        out["study_language"] = cls._clean_enum(raw.get("study_language"), cls._STUDY_LANGUAGES)
+        out["demographic_controls"] = cls._clean_bool(raw.get("demographic_controls"))
+        out["real_per_capita_income"] = cls._clean_float(raw.get("real_per_capita_income"))
+        out["budget_share"] = cls._clean_float(raw.get("budget_share"))
+        out["group_expenditure_elasticity"] = cls._clean_float(raw.get("group_expenditure_elasticity"))
+        out["group_own_price_elasticity"] = cls._clean_float(raw.get("group_own_price_elasticity"))
+        out["within_group_budget_share"] = cls._clean_float(raw.get("within_group_budget_share"))
+        out["n_products_in_demand_system"] = cls._clean_int(raw.get("n_products_in_demand_system"))
 
     @classmethod
     def _clean_food_group(cls, value: Any) -> Optional[str]:
@@ -590,6 +690,7 @@ class LLMClient:
         out["source_type"] = cls._clean_enum(raw.get("source_type"), cls._SOURCE_TYPES)
         out["target_food_group"] = cls._clean_food_group(raw.get("target_food_group"))
         out["target_cross_price_food_group"] = cls._clean_food_group(raw.get("target_cross_price_food_group"))
+        cls._parse_chen_fields(raw, out)
 
         # test_statistic: {"type": "t"/"z"/"chi2"/"f"/"other", "value": float}
         # — only kept if it has a usable numeric value; an unrecognized type
@@ -624,7 +725,7 @@ class LLMClient:
             out["review_reason"] = [r for r in rr if isinstance(r, str)]
         else:
             out["review_reason"] = []
-        out["requires_review"] = bool(raw.get("requires_review")) if isinstance(raw.get("requires_review"), bool) else bool(out["review_reason"])
+        cls._apply_chen_review_flags(out)
         # nothing usable at all: no coefficient AND no target match on either
         # side — the model is instructed to only emit real matches, but a
         # defensive check here costs nothing.
@@ -659,12 +760,9 @@ class LLMClient:
     # ----- Stage 4a: paper-level metadata (main, once per paper) -----
     @classmethod
     def _parse_paper_metadata_result(cls, raw: str) -> Optional[Dict[str, Any]]:
-        """Defensive parsing for the once-per-paper metadata call:
-        {"model_type", "countries_region", "time_period": {"start","end"},
-        "frequency", "n_obs", "n_units", "data_source"}. Every field is
-        optional/nullable — a paper whose methodology chunk didn't state its
-        sample size, say, should come back with n_obs: None rather than
-        failing the whole call."""
+        """Defensive parsing for the once-per-paper metadata call. Every field
+        is optional/nullable — missing income etc. stay null and get flagged
+        on the estimate rows after backfill."""
         if not raw:
             return None
         parsed = cls._parse_json(raw)
@@ -679,15 +777,24 @@ class LLMClient:
                 "start": start if isinstance(start, int) else None,
                 "end": end if isinstance(end, int) else None,
             }
-        return {
+        out: Dict[str, Any] = {
             "model_type": parsed.get("model_type") if isinstance(parsed.get("model_type"), str) else None,
             "countries_region": parsed.get("countries_region") if isinstance(parsed.get("countries_region"), str) else None,
             "time_period": time_period,
             "frequency": parsed.get("frequency") if isinstance(parsed.get("frequency"), str) else None,
-            "n_obs": parsed.get("n_obs") if isinstance(parsed.get("n_obs"), int) else None,
-            "n_units": parsed.get("n_units") if isinstance(parsed.get("n_units"), int) else None,
+            "n_obs": cls._clean_int(parsed.get("n_obs")),
+            "n_units": cls._clean_int(parsed.get("n_units")),
             "data_source": parsed.get("data_source") if isinstance(parsed.get("data_source"), str) else None,
         }
+        cls._parse_chen_fields(parsed, out)
+        # paper metadata has no per-product budget_share — leave unset so
+        # estimate-level parse / backfill owns that flag.
+        out.pop("budget_share", None)
+        out.pop("elasticity_form", None)
+        out.pop("group_expenditure_elasticity", None)
+        out.pop("group_own_price_elasticity", None)
+        out.pop("within_group_budget_share", None)
+        return out
 
     def extract_paper_metadata(self, abstract: Optional[str],
                                 methodology_text: str) -> Optional[Dict[str, Any]]:

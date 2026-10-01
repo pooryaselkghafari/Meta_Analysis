@@ -173,6 +173,20 @@ class Pipeline:
                 n_obs=raw.get("n_obs"),
                 n_units=raw.get("n_units"),
                 data_source=raw.get("data_source"),
+                real_per_capita_income=raw.get("real_per_capita_income"),
+                data_level=raw.get("data_level"),
+                geographic_scope=raw.get("geographic_scope"),
+                urban_rural=raw.get("urban_rural"),
+                data_type=raw.get("data_type"),
+                price_measure=raw.get("price_measure"),
+                conditioning=raw.get("conditioning"),
+                budgeting_stages=raw.get("budgeting_stages"),
+                demand_system=raw.get("demand_system"),
+                estimation_method=raw.get("estimation_method"),
+                demographic_controls=raw.get("demographic_controls"),
+                publication_status=raw.get("publication_status"),
+                study_language=raw.get("study_language"),
+                n_products_in_demand_system=raw.get("n_products_in_demand_system"),
             )
         return result
 
@@ -199,6 +213,29 @@ class Pipeline:
             rec.n_units = meta.n_units
         if rec.data_source is None:
             rec.data_source = meta.data_source
+        for field in (
+            "real_per_capita_income", "data_level", "geographic_scope", "urban_rural",
+            "data_type", "price_measure", "conditioning", "budgeting_stages",
+            "demand_system", "estimation_method", "demographic_controls",
+            "publication_status", "study_language", "n_products_in_demand_system",
+        ):
+            if getattr(rec, field) is None:
+                setattr(rec, field, getattr(meta, field))
+        # Re-apply Chen review flags after backfill so paper-level income
+        # clears the "missing income" reason when Stage 4a found it.
+        flags = {
+            "real_per_capita_income": rec.real_per_capita_income,
+            "budget_share": rec.budget_share,
+            "conditioning": rec.conditioning.value if hasattr(rec.conditioning, "value") else rec.conditioning,
+            "group_expenditure_elasticity": rec.group_expenditure_elasticity,
+            "group_own_price_elasticity": rec.group_own_price_elasticity,
+            "review_reason": list(rec.review_reason or []),
+            "requires_review": rec.requires_review,
+        }
+        from .llm import LLMClient
+        LLMClient._apply_chen_review_flags(flags)
+        rec.requires_review = flags["requires_review"]
+        rec.review_reason = flags["review_reason"]
 
     # Stage 4 — extraction (main LLM; skipped if prompts blank)
     def extract(self, chunks: List[Chunk],

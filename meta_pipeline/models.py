@@ -103,26 +103,96 @@ class SourceType(str, Enum):
 
 
 class FoodGroup(str, Enum):
-    """The standard 8-group food classification used in international demand-
-    system comparisons (e.g. the International Food Consumption Patterns
-    project) — see https://www.ers.usda.gov/data-products/commodity-and-food-elasticities/documentation.
-    Exists because papers report products at wildly different granularities
-    (some split "fruits" from "vegetables"; others report one combined "FV"
-    line; meats/grains have the same issue) and a user's own target product
-    list rarely matches any one paper's exact wording or aggregation level.
-    Normalizing every record onto this fixed 8-way axis, independent of both
-    the paper's own wording and the user's specific product list, is what
-    makes cross-paper comparison and regression possible despite that.
+    """Chen et al. (2016) nine product groups used in the meta-regression
+    product dummies and ln(income)×group interactions. Replaces the earlier
+    8-way ERS-style taxonomy so extraction, conversion, and dashboard tables
+    share one axis with the target paper's design.
     Populated by the extraction stage from general knowledge of what each
     product is, not from a per-project mapping the user has to maintain."""
-    BREAD_AND_CEREALS = "Bread and cereals"
-    MEAT = "Meat"
-    FISH_AND_SEAFOOD = "Fish and seafood"
-    DAIRY_PRODUCTS = "Dairy products"
-    FATS_AND_OILS = "Fats and oils"
-    FRUIT_AND_VEGETABLES = "Fruit and vegetables"
-    BEVERAGES_AND_TOBACCO = "Beverages and tobacco"
-    OTHER_FOOD_PRODUCTS = "Other food products"
+    GRAINS_AND_VEGETABLES = "Grains and vegetables"
+    MEAT_AND_EGGS = "Meat and eggs"
+    EDIBLE_OIL = "Edible oil"
+    AQUATIC_PRODUCTS = "Aquatic products"
+    FRUITS = "Fruits"
+    SUGAR = "Sugar"
+    DAIRY = "Dairy"
+    TOBACCO = "Tobacco"
+    ALCOHOL = "Alcohol"
+
+
+class DataLevel(str, Enum):
+    HOUSEHOLD_INDIVIDUAL = "household_individual"
+    AGGREGATE = "aggregate"
+
+
+class GeographicScope(str, Enum):
+    NATIONAL = "national"
+    REGIONAL = "regional"
+
+
+class UrbanRural(str, Enum):
+    BOTH = "both"
+    URBAN_ONLY = "urban_only"
+    RURAL_ONLY = "rural_only"
+
+
+class DataType(str, Enum):
+    CROSS_SECTION = "cross_section"
+    TIME_SERIES = "time_series"
+    POOLED = "pooled"
+    PANEL = "panel"
+
+
+class PriceMeasure(str, Enum):
+    ACTUAL_PRICES = "actual_prices"
+    UNIT_VALUES = "unit_values"
+
+
+class Conditioning(str, Enum):
+    UNCONDITIONAL = "unconditional"
+    CONDITIONAL_FOOD = "conditional_food"
+    CONDITIONAL_ANIMAL = "conditional_animal"
+    CONDITIONAL_GRAIN = "conditional_grain"
+
+
+class BudgetingStages(str, Enum):
+    SINGLE_STAGE = "single_stage"
+    MULTI_STAGE = "multi_stage"
+
+
+class DemandSystem(str, Enum):
+    NONE = "none"  # double-log, Working-Leser, etc.
+    LES_QES = "les_qes"
+    AIDS = "aids"
+    QUAIDS = "quaids"
+    TRANSLOG = "translog"
+    LINQUAD = "linquad"
+    ROTTERDAM = "rotterdam"
+
+
+class EstimationMethod(str, Enum):
+    OLS = "ols"
+    ML = "ml"
+    SUR = "sur"
+    GLS = "gls"
+    OTHER = "other"
+
+
+class ElasticityForm(str, Enum):
+    MARSHALLIAN = "marshallian"
+    HICKSIAN = "hicksian"
+    BOTH = "both"
+    UNKNOWN = "unknown"
+
+
+class PublicationStatus(str, Enum):
+    UNPUBLISHED = "unpublished"
+    PUBLISHED = "published"
+
+
+class StudyLanguage(str, Enum):
+    ENGLISH = "english"
+    OTHER = "other"
 
 
 # --------------------------------------------------------------------------- #
@@ -228,16 +298,12 @@ class TimePeriod:
 @dataclass
 class PaperMetadata:
     """Paper-level facts that are constant across nearly all of a paper's
-    estimates — country/region, sample period, frequency, N, data source, and
-    primary model/method. Extracted ONCE per paper (Stage 4a, from the
-    abstract plus every methodology/data_description chunk) rather than
-    re-asked of the model for every single coefficient it emits in Stage 4 —
-    asking a per-estimate call to restate the same constants ten or twenty
-    times over is wasted tokens and an avoidable source of inconsistency
-    (the model giving a slightly different N or year range each time).
+    estimates — country/region, sample period, frequency, N, data source,
+    primary model/method, and Chen et al. meta-regression study covariates.
+    Extracted ONCE per paper (Stage 4a) rather than re-asked per coefficient.
     Pipeline._backfill_paper_metadata fills these into each ExtractionRecord
     only where that record's own chunk didn't already state something more
-    specific (e.g. a robustness check run on a different subsample)."""
+    specific."""
     paper_id: str
     model_type: Optional[str] = None
     countries_region: Optional[str] = None
@@ -246,9 +312,28 @@ class PaperMetadata:
     n_obs: Optional[int] = None
     n_units: Optional[int] = None
     data_source: Optional[str] = None
+    # ---- Chen et al. study-level covariates ----
+    real_per_capita_income: Optional[float] = None
+    data_level: Optional[DataLevel] = None
+    geographic_scope: Optional[GeographicScope] = None
+    urban_rural: Optional[UrbanRural] = None
+    data_type: Optional[DataType] = None
+    price_measure: Optional[PriceMeasure] = None
+    conditioning: Optional[Conditioning] = None
+    budgeting_stages: Optional[BudgetingStages] = None
+    demand_system: Optional[DemandSystem] = None
+    estimation_method: Optional[EstimationMethod] = None
+    demographic_controls: Optional[bool] = None
+    publication_status: Optional[PublicationStatus] = None
+    study_language: Optional[StudyLanguage] = None
+    n_products_in_demand_system: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        for k, v in list(d.items()):
+            if isinstance(getattr(self, k, None), Enum):
+                d[k] = getattr(self, k).value
+        return d
 
 
 @dataclass
@@ -278,14 +363,9 @@ class ExtractionRecord:
     paper_elasticity_wording_raw: Optional[str] = None
     paper_product_wording_raw: Optional[str] = None
     paper_cross_price_product_wording_raw: Optional[str] = None
-    # Standard 8-group food classification (see FoodGroup) — always populated
+    # Chen / ERS-style product-group axis (see FoodGroup) — always populated
     # when the product is a food item, independent of whether target_product
-    # itself resolved to one of the user's specific target products. This is
-    # what lets an estimate survive and stay comparable even when the paper
-    # reports at a different aggregation level than the user's own target
-    # list (e.g. paper says "fruits and vegetables" combined; user's targets
-    # have "Fruits" and "Vegetables" separately, or neither) — in that case
-    # target_product is left null but target_food_group is still set.
+    # itself resolved to one of the user's specific target products.
     target_food_group: Optional[FoodGroup] = None
     target_cross_price_food_group: Optional[FoodGroup] = None
     match_type: Optional[MatchType] = None
@@ -334,6 +414,26 @@ class ExtractionRecord:
     n_obs: Optional[int] = None
     n_units: Optional[int] = None
     data_source: Optional[str] = None
+    # ---- Chen et al. covariates (Stage 4a default + estimate-level extras) ----
+    real_per_capita_income: Optional[float] = None
+    data_level: Optional[DataLevel] = None
+    geographic_scope: Optional[GeographicScope] = None
+    urban_rural: Optional[UrbanRural] = None
+    data_type: Optional[DataType] = None
+    price_measure: Optional[PriceMeasure] = None
+    conditioning: Optional[Conditioning] = None
+    budgeting_stages: Optional[BudgetingStages] = None
+    demand_system: Optional[DemandSystem] = None
+    estimation_method: Optional[EstimationMethod] = None
+    demographic_controls: Optional[bool] = None
+    publication_status: Optional[PublicationStatus] = None
+    study_language: Optional[StudyLanguage] = None
+    n_products_in_demand_system: Optional[int] = None
+    elasticity_form: Optional[ElasticityForm] = None
+    budget_share: Optional[float] = None
+    group_expenditure_elasticity: Optional[float] = None
+    group_own_price_elasticity: Optional[float] = None
+    within_group_budget_share: Optional[float] = None
 
     # ---- provenance ----
     source_location: SourceLocation = field(default_factory=SourceLocation)

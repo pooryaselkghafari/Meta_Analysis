@@ -241,7 +241,7 @@ def api_activate_project(project_id):
 # from the actual output files on every request: it can never drift out of
 # sync with reality because there's nothing to fall out of sync.
 # --------------------------------------------------------------------------- #
-STAGE_ORDER = ["corpus", "cheap_ai", "detection_ai", "main_ai", "regression", "dashboard"]
+STAGE_ORDER = ["corpus", "cheap_ai", "detection_ai", "main_ai", "dashboard"]
 # Human label + the page where each stage is actually run — used both for
 # "you need X first" messaging on a locked page and for the link that gets
 # you there.
@@ -250,24 +250,19 @@ STAGE_LABELS = {
     "cheap_ai": "Cheap AI — Classification",
     "detection_ai": "Detection AI — Detection",
     "main_ai": "Main AI — Extraction",
-    "regression": "Regression — Meta-analysis",
-    "dashboard": "Dashboard — Key findings",
+    "dashboard": "Dashboard — Meta Analysis Results",
 }
 STAGE_HREFS = {
     "corpus": "/", "cheap_ai": "/cheap-ai", "detection_ai": "/detection-ai",
-    "main_ai": "/main-ai", "regression": "/regression", "dashboard": "/dashboard",
+    "main_ai": "/main-ai", "dashboard": "/dashboard",
 }
 # Which stage must be *_done before a given page is allowed to open at all.
-# "/" (Corpus/upload) and "/settings" have no prerequisite. Regression and
-# Dashboard both gate on main_ai_done for consistency with every other
-# stage's strict gating, even though technically only *some* extraction
-# records would suffice — the user must finish Stage 4 extraction fully
-# before either unlocks. Dashboard doesn't require any regression runs to
-# exist (it just shows an empty state for that section if none do yet),
-# since summary stats over the extracted records are useful on their own.
+# "/" (Corpus/upload) and "/settings" have no prerequisite. Dashboard gates
+# on main_ai_done — Chen Tables 1–4 are built from extracted records.
 PAGE_REQUIRES = {
     "results": "corpus", "cheap_ai": "corpus", "detection_ai": "cheap_ai",
-    "main_ai": "detection_ai", "regression": "main_ai", "dashboard": "main_ai",
+    "main_ai": "detection_ai", "dashboard": "main_ai",
+    # Legacy /regression URL still loads a deprecation notice (no gate).
 }
 
 
@@ -404,8 +399,9 @@ def main_ai_page():
 
 @app.route("/regression")
 def regression_page():
-    locked = _locked_response("regression", "Regression")
-    return locked or render_template("regression.html")
+    """Deprecated: generic OLS/WLS picker replaced by Chen Tables 1–4 on
+    the Dashboard. Keep the URL so old bookmarks don't 404."""
+    return render_template("regression_deprecated.html")
 
 
 @app.route("/dashboard")
@@ -460,6 +456,12 @@ def delete_paper(paper_id):
     if not matches:
         return jsonify({"error": "not found"}), 404
     matches[0].unlink()
+    # Any in-flight/paused AI job still points at the old corpus — stop them
+    # so Main AI doesn't resume a stale larger run after papers were removed.
+    stage_jobs.stop_all_jobs(
+        _get_active_project_id(),
+        reason="Cleared because a paper was removed from the corpus.",
+    )
     return jsonify({"deleted": paper_id})
 
 
@@ -488,7 +490,7 @@ def save_targets():
 
 @app.route("/api/food-groups", methods=["GET"])
 def get_food_groups():
-    """The fixed standard 8-group food classification (see FoodGroup in
+    """The fixed Chen et al. nine product groups (see FoodGroup in
     meta_pipeline/models.py) — unlike elasticities/products, this isn't
     user-editable per project, just a reference vocab the Dashboard's filter
     bar and the Main AI edit form need."""
@@ -503,6 +505,13 @@ def analyze():
     n_papers = len(list(INPUT_DIR.glob("*.pdf")))
     if n_papers == 0:
         return jsonify({"error": "no papers uploaded"}), 400
+
+    # Corpus rebuild invalidates every AI stage — kill paused/running jobs so
+    # their progress files can't resurrect the old totals on later pages.
+    stage_jobs.stop_all_jobs(
+        _get_active_project_id(),
+        reason="Cleared because the corpus was re-analyzed.",
+    )
 
     cfg = PipelineConfig(
         input_dir=str(INPUT_DIR),
@@ -832,14 +841,86 @@ def cheap_ai_classify_resume():
     return jsonify(progress)
 
 
+@app.route("/api/cheap-ai/classify/stop", methods=["POST"])
+def cheap_ai_classify_stop():
+    progress = stage_jobs.stop_job(_get_active_project_id(), "classify", reason=None)
+    progress["stopped"] = True
+    return jsonify(progress)
+
+
 @app.route("/api/detection-ai/detect/progress", methods=["GET"])
 def detection_ai_detect_progress():
     return jsonify(_read_progress("detect"))
 
 
+@app.route("/api/detection-ai/detect/pause", methods=["POST"])
+def detection_ai_detect_pause():
+    progress = _read_progress("detect")
+    if not progress["running"]:
+        return jsonify({"error": "no detection run is currently in progress"}), 400
+    progress["paused"] = True
+    _write_progress("detect", progress)
+    return jsonify(progress)
+
+
+@app.route("/api/detection-ai/detect/resume", methods=["POST"])
+def detection_ai_detect_resume():
+    progress = _read_progress("detect")
+    progress["paused"] = False
+    _write_progress("detect", progress)
+    return jsonify(progress)
+
+
+@app.route("/api/detection-ai/detect/stop", methods=["POST"])
+def detection_ai_detect_stop():
+    progress = stage_jobs.stop_job(_get_active_project_id(), "detect", reason=None)
+    progress["stopped"] = True
+    return jsonify(progress)
+
+
 @app.route("/api/main-ai/extract/progress", methods=["GET"])
 def main_ai_extract_progress():
-    return jsonify(_read_progress("extract"))
+    """Return extract progress, but auto-stop a stale paused/running job whose
+    ``total`` no longer matches the current extractable corpus (e.g. papers
+    removed + Cheap/Detection re-run while Main AI was still paused)."""
+    project_id = _get_active_project_id()
+    progress = stage_jobs.reconcile_stale_job(project_id, "extract")
+    if progress.get("running"):
+        extractable = _extractable_chunks(_kept_chunks())
+        expected = len(extractable)
+        reported = progress.get("total")
+        if isinstance(reported, int) and reported > 0 and expected != reported:
+            progress = stage_jobs.stop_job(
+                project_id, "extract",
+                reason="Cleared — extractable corpus changed since this run started. Click Run extraction to start on the current papers.",
+            )
+            progress["stopped"] = True
+    return jsonify(progress)
+
+
+@app.route("/api/main-ai/extract/pause", methods=["POST"])
+def main_ai_extract_pause():
+    progress = _read_progress("extract")
+    if not progress["running"]:
+        return jsonify({"error": "no extraction run is currently in progress"}), 400
+    progress["paused"] = True
+    _write_progress("extract", progress)
+    return jsonify(progress)
+
+
+@app.route("/api/main-ai/extract/resume", methods=["POST"])
+def main_ai_extract_resume():
+    progress = _read_progress("extract")
+    progress["paused"] = False
+    _write_progress("extract", progress)
+    return jsonify(progress)
+
+
+@app.route("/api/main-ai/extract/stop", methods=["POST"])
+def main_ai_extract_stop():
+    progress = stage_jobs.stop_job(_get_active_project_id(), "extract", reason=None)
+    progress["stopped"] = True
+    return jsonify(progress)
 
 
 @app.route("/api/cheap-ai/papers", methods=["GET"])
@@ -1104,6 +1185,13 @@ _CSV_COLUMNS = [
     "specification_status", "baseline_evidence", "model_type",
     "countries_region", "time_period_start", "time_period_end", "frequency",
     "n_obs", "n_units", "data_source",
+    "real_per_capita_income", "data_level", "geographic_scope", "urban_rural",
+    "data_type", "price_measure", "conditioning", "budgeting_stages",
+    "demand_system", "estimation_method", "demographic_controls",
+    "publication_status", "study_language", "n_products_in_demand_system",
+    "elasticity_form", "budget_share",
+    "group_expenditure_elasticity", "group_own_price_elasticity",
+    "within_group_budget_share",
     "source_type", "source_row", "source_column", "source_page",
     "table_complete", "pages_used",
     "requires_review", "review_reason",
@@ -1159,6 +1247,25 @@ def _record_to_csv_row(r: dict) -> dict:
         "n_obs": r.get("n_obs"),
         "n_units": r.get("n_units"),
         "data_source": r.get("data_source"),
+        "real_per_capita_income": r.get("real_per_capita_income"),
+        "data_level": r.get("data_level"),
+        "geographic_scope": r.get("geographic_scope"),
+        "urban_rural": r.get("urban_rural"),
+        "data_type": r.get("data_type"),
+        "price_measure": r.get("price_measure"),
+        "conditioning": r.get("conditioning"),
+        "budgeting_stages": r.get("budgeting_stages"),
+        "demand_system": r.get("demand_system"),
+        "estimation_method": r.get("estimation_method"),
+        "demographic_controls": r.get("demographic_controls"),
+        "publication_status": r.get("publication_status"),
+        "study_language": r.get("study_language"),
+        "n_products_in_demand_system": r.get("n_products_in_demand_system"),
+        "elasticity_form": r.get("elasticity_form"),
+        "budget_share": r.get("budget_share"),
+        "group_expenditure_elasticity": r.get("group_expenditure_elasticity"),
+        "group_own_price_elasticity": r.get("group_own_price_elasticity"),
+        "within_group_budget_share": r.get("within_group_budget_share"),
         "source_type": r.get("source_type"),
         "source_row": loc.get("row") if isinstance(loc, dict) else None,
         "source_column": loc.get("column") if isinstance(loc, dict) else None,
@@ -1216,11 +1323,28 @@ _RECORD_ENUM_FIELDS = {
     "elasticity_transformation_type": LLMClient._TRANSFORMATION_TYPES,
     "target_food_group": LLMClient._FOOD_GROUPS,
     "target_cross_price_food_group": LLMClient._FOOD_GROUPS,
+    "data_level": LLMClient._DATA_LEVELS,
+    "geographic_scope": LLMClient._GEOGRAPHIC_SCOPES,
+    "urban_rural": LLMClient._URBAN_RURAL,
+    "data_type": LLMClient._DATA_TYPES,
+    "price_measure": LLMClient._PRICE_MEASURES,
+    "conditioning": LLMClient._CONDITIONINGS,
+    "budgeting_stages": LLMClient._BUDGETING_STAGES,
+    "demand_system": LLMClient._DEMAND_SYSTEMS,
+    "estimation_method": LLMClient._ESTIMATION_METHODS,
+    "elasticity_form": LLMClient._ELASTICITY_FORMS,
+    "publication_status": LLMClient._PUBLICATION_STATUSES,
+    "study_language": LLMClient._STUDY_LANGUAGES,
 }
-_RECORD_NUMERIC_FIELDS = {"coefficient", "standard_error", "p_value", "n_obs", "n_units"}
-_RECORD_INT_FIELDS = {"n_obs", "n_units"}
+_RECORD_NUMERIC_FIELDS = {
+    "coefficient", "standard_error", "p_value", "n_obs", "n_units",
+    "real_per_capita_income", "budget_share",
+    "group_expenditure_elasticity", "group_own_price_elasticity",
+    "within_group_budget_share", "n_products_in_demand_system",
+}
+_RECORD_INT_FIELDS = {"n_obs", "n_units", "n_products_in_demand_system"}
 _RECORD_BOOL_FIELDS = {
-    "elasticity_is_raw", "requires_review",
+    "elasticity_is_raw", "requires_review", "demographic_controls",
     "standard_error_reported", "confidence_interval_reported", "p_value_reported",
 }
 _RECORD_TEXT_FIELDS = {
@@ -1255,6 +1379,14 @@ def _blank_record(paper_id: str) -> dict:
         "model_type": None, "countries_region": None, "frequency": None,
         "time_period": {"start": None, "end": None},
         "n_obs": None, "n_units": None, "data_source": None, "source_type": None,
+        "real_per_capita_income": None, "data_level": None, "geographic_scope": None,
+        "urban_rural": None, "data_type": None, "price_measure": None,
+        "conditioning": None, "budgeting_stages": None, "demand_system": None,
+        "estimation_method": None, "demographic_controls": None,
+        "publication_status": None, "study_language": None,
+        "n_products_in_demand_system": None, "elasticity_form": None,
+        "budget_share": None, "group_expenditure_elasticity": None,
+        "group_own_price_elasticity": None, "within_group_budget_share": None,
         "source_location": {"page": None, "table": None, "text_anchor": None, "row": None, "column": None},
         "table_complete": None, "pages_used": [],
         "requires_review": False, "review_reason": [],
@@ -1362,6 +1494,9 @@ def main_ai_update_record(estimate_id):
             loc[key] = value or None
 
     rec["manually_edited"] = True
+    # Recompute Chen missing-data review flags after edits (e.g. filling income
+    # or budget share should clear those auto-reasons).
+    LLMClient._apply_chen_review_flags(rec)
     (OUTPUT_DIR / "records.json").write_text(json.dumps(records, indent=2))
     return jsonify({"record": rec})
 
@@ -1417,12 +1552,14 @@ def _record_from_estimate(raw: dict, chunk: dict, idx: int, meta: dict) -> dict:
     rec["pages_used"] = chunk.get("pages_used") or []
 
     meta = meta or {}
-    for field in ("model_type", "countries_region", "frequency", "n_obs", "n_units", "data_source"):
+    for field in ("model_type", "countries_region", "frequency", "n_obs", "n_units", "data_source",
+                  *LLMClient._CHEN_PAPER_FIELDS):
         if rec.get(field) is None:
             rec[field] = meta.get(field)
     tp = rec.get("time_period")
     if not tp or (tp.get("start") is None and tp.get("end") is None):
         rec["time_period"] = meta.get("time_period") or {"start": None, "end": None}
+    LLMClient._apply_chen_review_flags(rec)
     return rec
 
 
@@ -1620,38 +1757,12 @@ def regression_delete_run(run_id):
 
 
 # --------------------------------------------------------------------------- #
-# Dashboard — the final "key findings" page: corpus/extraction summary
-# statistics plus whatever regression runs are already saved (it reads
-# regression_runs.json but doesn't run anything itself — Regression is where
-# a model actually gets fit; Dashboard is presentation-only).
+# Dashboard — Chen et al. Tables 1–4 over extracted records (country filter
+# refilters the sample and recomputes descriptives + meta-regression).
 # --------------------------------------------------------------------------- #
-def _top_counts(records: list, field: str, limit: int = 12) -> list:
-    """[{value, count}, ...] for the most common non-empty values of `field`
-    across records, most common first — used for the coverage breakdowns
-    (products, elasticity types, countries, etc.) on the dashboard."""
-    counter = Counter(r.get(field) for r in records if r.get(field))
-    return [{"value": v, "count": c} for v, c in counter.most_common(limit)]
-
-
-def _numeric_summary(records: list, field: str) -> dict:
-    vals = [r[field] for r in records if isinstance(r.get(field), (int, float))]
-    if not vals:
-        return {"n": 0, "mean": None, "median": None, "min": None, "max": None}
-    return {
-        "n": len(vals),
-        "mean": statistics.fmean(vals),
-        "median": statistics.median(vals),
-        "min": min(vals),
-        "max": max(vals),
-    }
-
-
 def _multi_query_param(name: str) -> list:
-    """Reads a filter param that may arrive either as repeated query keys
-    (?elasticity_type=a&elasticity_type=b) or as one comma-separated value
-    (?elasticity_type=a,b) — the dashboard's checkbox filter sends the
-    former, but this keeps the endpoint forgiving either way. Empty/blank
-    entries are dropped; an empty result means "no filter" (show all)."""
+    """Reads a filter param as repeated keys (?country=a&country=b) or one
+    comma-separated value. Empty/blank entries dropped; empty list = no filter."""
     out = []
     for raw in request.args.getlist(name):
         out.extend(v.strip() for v in raw.split(",") if v.strip())
@@ -1660,53 +1771,18 @@ def _multi_query_param(name: str) -> list:
 
 @app.route("/api/dashboard/summary", methods=["GET"])
 def dashboard_summary():
-    """Summary stats over the extracted records, optionally restricted to
-    one or more of the elasticity types / products the user originally
-    asked for on the upload page (targets.json) — e.g. only "Income
-    elasticity" records, or only "Maize" — via repeated ?elasticity_type=
-    and ?product= query params. Chunk/paper funnel counts (papers_total,
-    chunks_*) describe the corpus as a whole and aren't filtered, since
-    they're not meaningfully sliceable by a target that's only assigned
-    once extraction runs; everything computed from records.json is."""
-    kept = _kept_chunks()
-    classifiable = _classifiable_chunks(kept)
-    extractable = _extractable_chunks(classifiable)
+    """Build Chen-style Tables 1–4 from records.json. Optional repeated
+    ``?country=`` query params restrict the sample (exact match on
+    ``countries_region``)."""
+    import chen_meta
+
     all_records = _load_json(OUTPUT_DIR / "records.json", [])
-
-    elasticity_filter = set(_multi_query_param("elasticity_type"))
-    product_filter = set(_multi_query_param("product"))
-    food_group_filter = set(_multi_query_param("food_group"))
-    records = [
-        r for r in all_records
-        if (not elasticity_filter or r.get("target_elasticity_type") in elasticity_filter)
-        and (not product_filter or r.get("target_product") in product_filter)
-        and (not food_group_filter or r.get("target_food_group") in food_group_filter)
-    ]
-
-    papers_total = len(list(INPUT_DIR.glob("*.pdf")))
-    papers_with_records = len({r["paper_id"] for r in records if r.get("paper_id")})
-
-    return jsonify({
-        "papers_total": papers_total,
-        "papers_with_records": papers_with_records,
-        "chunks_total": len(_load_json(OUTPUT_DIR / "chunks.json", [])),
-        "chunks_kept": len(kept),
-        "chunks_classified": len(classifiable),
-        "chunks_detected_positive": len(extractable),
-        "records_total": len(records),
-        "records_total_unfiltered": len(all_records),
-        "records_requires_review": sum(1 for r in records if r.get("requires_review")),
-        "records_manually_edited": sum(1 for r in records if r.get("manually_edited")),
-        "products": _top_counts(records, "target_product"),
-        "food_groups": _top_counts(records, "target_food_group"),
-        "elasticity_types": _top_counts(records, "target_elasticity_type"),
-        "countries": _top_counts(records, "countries_region"),
-        "data_sources": _top_counts(records, "data_source"),
-        "model_types": _top_counts(records, "model_type"),
-        "specification_status": _top_counts(records, "specification_status"),
-        "coefficient_summary": _numeric_summary(records, "coefficient"),
-        "regression_runs": _load_regression_runs(),
-    })
+    countries = _multi_query_param("country")
+    try:
+        payload = chen_meta.build_dashboard(all_records, countries or None)
+    except Exception as e:
+        return jsonify({"error": f"Dashboard build failed: {e}"}), 500
+    return jsonify(payload)
 
 
 # --------------------------------------------------------------------------- #

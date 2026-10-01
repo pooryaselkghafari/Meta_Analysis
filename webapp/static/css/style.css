@@ -210,6 +210,7 @@ a { color: inherit; }
 select.field-input,
 .chunk-label-select,
 .paper-filter-select,
+.country-filter-select,
 select.edit-input {
   appearance: none;
   -webkit-appearance: none;
@@ -232,6 +233,7 @@ select.edit-input {
 select.field-input:hover,
 .chunk-label-select:hover,
 .paper-filter-select:hover,
+.country-filter-select:hover,
 select.edit-input:hover {
   border-color: color-mix(in srgb, var(--border) 60%, var(--muted));
 }
@@ -239,6 +241,7 @@ select.edit-input:hover {
 select.field-input:focus,
 .chunk-label-select:focus,
 .paper-filter-select:focus,
+.country-filter-select:focus,
 select.edit-input:focus {
   outline: none;
   border-color: var(--accent);
@@ -248,6 +251,7 @@ select.edit-input:focus {
 select.field-input:disabled,
 .chunk-label-select:disabled,
 .paper-filter-select:disabled,
+.country-filter-select:disabled,
 select.edit-input:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -265,6 +269,11 @@ select.field-input {
 
 .paper-filter-select {
   width: 200px;
+  max-width: 100%;
+}
+
+.country-filter-select {
+  width: 280px;
   max-width: 100%;
 }
 
@@ -1628,56 +1637,24 @@ select.edit-input {
 .dash-filter-bar {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 24px;
-  margin-bottom: 22px;
-  padding: 14px 16px;
-  background: var(--paper-raised);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-}
-
-.dash-filter-bar:empty { display: none; margin-bottom: 0; padding: 0; border: none; }
-
-.dash-filter-group { display: flex; flex-direction: column; gap: 6px; }
-
-.dash-filter-title {
-  font-size: var(--text-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-dim);
-  font-weight: 600;
-}
-
-.dash-filter-options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  max-width: 480px;
-}
-
-.dash-filter-chip {
-  display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: var(--text-sm);
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 3px 10px 3px 8px;
-  background: var(--paper);
-  cursor: pointer;
-}
-.dash-filter-chip:has(input:checked) {
-  background: var(--kept-bg);
-  border-color: var(--kept);
-  color: var(--kept);
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
 }
 
-.dash-filter-clear {
-  align-self: flex-end;
-  padding: 5px 12px;
+.dash-filter-bar:empty { display: none; margin-bottom: 0; }
+
+.dash-filter-label {
   font-size: var(--text-sm);
+  color: var(--text-dim);
+  font-weight: 500;
 }
+
+.dash-filter-empty { font-size: var(--text-sm); color: var(--text-dim); }
 
 .dash-cards {
   display: grid;
@@ -1715,15 +1692,16 @@ select.edit-input {
   line-height: 1.4;
 }
 
-.dash-section { margin-bottom: 34px; }
+.dash-section { margin-bottom: 40px; }
 
 .dash-section-title {
   font-family: var(--font);
-  font-weight: 600;
-  font-size: 17px;
-  margin-bottom: 14px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--line);
+  font-weight: 700;
+  font-size: 18px;
+  margin-bottom: 6px;
+  padding-bottom: 0;
+  border-bottom: none;
+  color: #111;
 }
 
 .dash-coverage-grid {
@@ -1769,3 +1747,156 @@ select.edit-input {
   font-size: var(--text-xs);
   fill: var(--text-dim);
 }
+
+/* Chen dashboard tables */
+.dash-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }
+.dash-meta-chip {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+}
+.dash-notice {
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  font-size: var(--text-sm);
+  color: var(--text);
+  line-height: 1.45;
+}
+.dash-notice .btn-primary { display: inline-block; margin-top: 10px; text-decoration: none; }
+.dash-section-sub {
+  font-family: var(--font);
+  font-size: 14px;
+  color: #444;
+  margin: 0 0 14px;
+}
+.chen-table-wrap {
+  overflow-x: auto;
+  background: #fff;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+}
+
+/* Academic / booktabs-style results tables */
+.chen-table {
+  width: 100%;
+  border-collapse: collapse;
+  border-spacing: 0;
+  font-family: var(--font);
+  font-size: 15px;
+  color: #111;
+  background: #fff;
+  border-top: 1px solid #111;
+  border-bottom: 2.25px solid #111;
+}
+
+.chen-table th,
+.chen-table td {
+  padding: 9px 16px;
+  border: none;
+  background: transparent;
+  vertical-align: middle;
+}
+
+.chen-table thead th {
+  font-weight: 700;
+  text-align: center;
+  white-space: nowrap;
+  border-bottom: 2.25px solid #111;
+}
+
+.chen-table thead th:first-child { text-align: left; }
+
+.chen-table thead tr:first-child th { border-bottom: 1px solid #111; }
+.chen-table thead tr:last-child th { border-bottom: 2.25px solid #111; }
+.chen-table thead tr:only-child th { border-bottom: 2.25px solid #111; }
+
+.chen-table tbody td { text-align: center; }
+
+.chen-table tbody td:first-child,
+.chen-table .reg-var-name {
+  text-align: left;
+  font-weight: 700;
+  white-space: nowrap;
+  color: #111;
+  border-bottom: none;
+  padding: 9px 16px;
+}
+
+.chen-table tbody tr:last-child td { border-bottom: none; }
+
+.chen-table-compact th,
+.chen-table-compact td {
+  padding: 6px 12px;
+  font-size: 14px;
+}
+
+.chen-footnote {
+  font-family: var(--font);
+  font-size: 13px;
+  color: #444;
+  margin-top: 10px;
+  font-style: italic;
+}
+
+.chen-char-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 22px;
+}
+
+.chen-char-block {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+
+.chen-char-title {
+  font-family: var(--font);
+  font-size: 15px;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #111;
+  padding: 0 0 6px;
+}
+
+.chen-table .reg-cell,
+.chen-table .reg-cell-empty {
+  text-align: center;
+  border-bottom: none;
+  padding: 10px 16px;
+  min-width: 100px;
+  color: #111;
+}
+
+.chen-table .reg-coef {
+  font-family: inherit;
+  font-weight: 400;
+  line-height: 1.25;
+}
+
+.chen-table .reg-se {
+  font-family: inherit;
+  color: #111;
+  font-size: 0.92em;
+  line-height: 1.25;
+  margin-top: 1px;
+}
+
+.chen-table .reg-stats tr td {
+  border-top: 1px solid #111;
+  border-bottom: none;
+}
+
+.chen-table .reg-stats tr:first-child td { border-top: 1px solid #111; }
+.chen-table .reg-stats tr:not(:first-child) td { border-top: none; }
+
+.dash-filter-empty { font-size: var(--text-sm); color: var(--text-dim); }

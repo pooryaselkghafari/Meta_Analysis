@@ -9,7 +9,6 @@
     "/cheap-ai": "corpus",
     "/detection-ai": "cheap_ai",
     "/main-ai": "detection_ai",
-    "/regression": "main_ai",
     "/dashboard": "main_ai",
     "/settings": null,
   };
@@ -18,8 +17,7 @@
     cheap_ai: "Cheap AI — Classification",
     detection_ai: "Detection AI — Detection",
     main_ai: "Main AI — Extraction",
-    regression: "Regression — Meta-analysis",
-    dashboard: "Dashboard — Key findings",
+    dashboard: "Dashboard — Meta Analysis Results",
   };
 
   async function applyNavState() {

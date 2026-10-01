@@ -5,6 +5,8 @@ const detectStatus = document.getElementById('detect-status');
 const detectProgress = document.getElementById('detect-progress');
 const detectProgressFill = document.getElementById('detect-progress-fill');
 const detectProgressLabel = document.getElementById('detect-progress-label');
+const pauseBtn = document.getElementById('pause-btn');
+const stopBtn = document.getElementById('stop-btn');
 const nextStageBtn = document.getElementById('next-stage-btn');
 
 let papers = [];
@@ -175,14 +177,28 @@ function hideProgressBar() {
   detectProgress.hidden = true;
 }
 
+function setPauseButton(paused) {
+  pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+  pauseBtn.classList.toggle('is-paused', paused);
+  pauseBtn.disabled = false;
+}
+
 function applyDetectProgress(p) {
   const done = p.completed != null ? p.completed : p.screened;
   const pct = p.total ? Math.round(100 * done / p.total) : 0;
   detectProgressFill.style.width = `${pct}%`;
-  detectProgressLabel.textContent = p.paper_id
-    ? `Working on "${p.paper_id}" — ${done}/${p.total} completed (${p.screened} screened) — ${pct}%`
-    : `${done}/${p.total} completed (${p.screened} screened) — ${pct}%`;
-  detectStatus.textContent = `Screening kept chunks… ${done}/${p.total} done`;
+  setPauseButton(!!p.paused);
+  if (p.paused) {
+    detectProgressLabel.textContent = `Paused — ${done}/${p.total} completed (${p.screened} screened) — ${pct}%`;
+    detectStatus.textContent = `Paused. ${p.screened}/${p.total} done so far.`;
+    detectStatus.classList.remove('busy');
+  } else {
+    detectProgressLabel.textContent = p.paper_id
+      ? `Working on "${p.paper_id}" — ${done}/${p.total} completed (${p.screened} screened) — ${pct}%`
+      : `${done}/${p.total} completed (${p.screened} screened) — ${pct}%`;
+    detectStatus.textContent = `Screening kept chunks… ${done}/${p.total} done`;
+    detectStatus.classList.add('busy');
+  }
 }
 
 async function refreshDetectViews(paperId) {
@@ -221,11 +237,49 @@ async function pollUntilDetectDone() {
   }
 }
 
+
+stopBtn.addEventListener('click', async () => {
+  if (!confirm('Stop this run? Progress so far is kept, but the job will not continue.')) return;
+  stopBtn.disabled = true;
+  pauseBtn.disabled = true;
+  try {
+    const res = await fetch('/api/detection-ai/detect/stop', { method: 'POST' });
+    const p = await res.json();
+    if (!res.ok) {
+      alert(p.error || 'Could not stop the job.');
+      stopBtn.disabled = false;
+      pauseBtn.disabled = false;
+      return;
+    }
+    // Polling loop will see running:false and finish the UI.
+  } catch (e) {
+    stopBtn.disabled = false;
+    pauseBtn.disabled = false;
+  }
+});
+
+pauseBtn.addEventListener('click', async () => {
+  pauseBtn.disabled = true;
+  const isPaused = pauseBtn.classList.contains('is-paused');
+  const endpoint = isPaused ? '/api/detection-ai/detect/resume' : '/api/detection-ai/detect/pause';
+  try {
+    const res = await fetch(endpoint, { method: 'POST' });
+    const p = await res.json();
+    if (res.ok) applyDetectProgress(p);
+    else pauseBtn.disabled = false;
+  } catch (e) {
+    pauseBtn.disabled = false;
+  }
+});
+
 detectBtn.addEventListener('click', async () => {
   detectBtn.disabled = true;
   detectStatus.textContent = 'Screening kept chunks…';
   detectStatus.classList.add('busy');
   showProgressBar();
+  pauseBtn.hidden = false;
+  stopBtn.hidden = false;
+  setPauseButton(false);
   try {
     const res = await fetch('/api/detection-ai/detect', { method: 'POST' });
     const data = await res.json();
@@ -233,7 +287,12 @@ detectBtn.addEventListener('click', async () => {
       if (res.status === 409) {
         const finalProgress = await pollUntilDetectDone();
         hideProgressBar();
-        if (finalProgress.error) {
+        pauseBtn.hidden = true;
+  stopBtn.hidden = true;
+        if (finalProgress.stopped) {
+      detectStatus.textContent = finalProgress.error
+        || `Stopped — ${finalProgress.completed || 0}/${finalProgress.total || 0} completed.`;
+    } else if (finalProgress.error) {
           detectStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.screened}/${finalProgress.total} completed before the error).`;
         } else {
           detectStatus.textContent = `Screened ${finalProgress.screened} of ${finalProgress.total} chunks — dropped ${finalProgress.dropped || 0}.`;
@@ -244,6 +303,8 @@ detectBtn.addEventListener('click', async () => {
         return;
       }
       hideProgressBar();
+      pauseBtn.hidden = true;
+  stopBtn.hidden = true;
       detectStatus.textContent = data.error || 'Detection failed.';
       detectStatus.classList.remove('busy');
       detectBtn.disabled = false;
@@ -252,7 +313,12 @@ detectBtn.addEventListener('click', async () => {
     }
     const finalProgress = await pollUntilDetectDone();
     hideProgressBar();
-    if (finalProgress.error) {
+    pauseBtn.hidden = true;
+  stopBtn.hidden = true;
+    if (finalProgress.stopped) {
+      detectStatus.textContent = finalProgress.error
+        || `Stopped — ${finalProgress.completed || 0}/${finalProgress.total || 0} completed.`;
+    } else if (finalProgress.error) {
       detectStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.screened}/${finalProgress.total} completed before the error).`;
     } else {
       detectStatus.textContent = `Screened ${finalProgress.screened} of ${finalProgress.total} chunks — dropped ${finalProgress.dropped || 0}.`;
@@ -261,6 +327,8 @@ detectBtn.addEventListener('click', async () => {
     await loadPapers();
   } catch (e) {
     hideProgressBar();
+    pauseBtn.hidden = true;
+  stopBtn.hidden = true;
     detectStatus.textContent = 'Detection failed — check the server log.';
     detectStatus.classList.remove('busy');
     await loadPapers();
@@ -275,10 +343,17 @@ async function resumeDetectIfRunning() {
     if (!p.running) return;
     detectBtn.disabled = true;
     showProgressBar();
+    pauseBtn.hidden = false;
+  stopBtn.hidden = false;
     applyDetectProgress(p);
     const finalProgress = await pollUntilDetectDone();
     hideProgressBar();
-    if (finalProgress.error) {
+    pauseBtn.hidden = true;
+  stopBtn.hidden = true;
+    if (finalProgress.stopped) {
+      detectStatus.textContent = finalProgress.error
+        || `Stopped — ${finalProgress.completed || 0}/${finalProgress.total || 0} completed.`;
+    } else if (finalProgress.error) {
       detectStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.screened}/${finalProgress.total} completed before the error).`;
     } else {
       detectStatus.textContent = `Screened ${finalProgress.screened} of ${finalProgress.total} chunks — dropped ${finalProgress.dropped || 0}.`;

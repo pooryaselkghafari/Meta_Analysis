@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Regression (deprecated) &middot; MetaExtract</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+
+{% set nav_active = 'dashboard' %}
+{% include '_header.html' %}
+
+<div class="dash-layout">
+  <div class="dash-header">
+    <div class="dash-title">Regression page deprecated</div>
+    <div class="dash-sub">
+      The generic OLS / WLS builder has been replaced by the Chen et al. meta-analysis
+      tables on the Dashboard (descriptives, variance-equation WLS, and predictions).
+    </div>
+  </div>
+  <div class="dash-notice">
+    <p>Open the Dashboard to run Tables 1–4 with a country filter.</p>
+    <p><a class="btn-primary" href="/dashboard">Go to Dashboard</a></p>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/nav_state.js') }}"></script>
+</body>
+</html>

@@ -77,7 +77,7 @@ async function loadFieldCatalog() {
 
   filterGroups.innerHTML = FILTERABLE.filter(k => fields[k]).map(k => {
     // A fixed vocab from the field catalog itself (e.g. target_food_group's
-    // 8 standard groups) takes priority over a project-defined targets.json
+    // Chen 9 product groups) takes priority over a project-defined targets.json
     // list — both render as checkboxes the same way, just from a different
     // source of truth.
     const targetKey = TARGET_LIST_FIELDS[k];

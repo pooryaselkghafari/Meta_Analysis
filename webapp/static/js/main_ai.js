@@ -8,6 +8,9 @@ const extractStatus = document.getElementById('extract-status');
 const extractProgress = document.getElementById('extract-progress');
 const extractProgressFill = document.getElementById('extract-progress-fill');
 const extractProgressLabel = document.getElementById('extract-progress-label');
+const pauseBtn = document.getElementById('pause-btn');
+const stopBtn = document.getElementById('stop-btn');
+const nextStageBtn = document.getElementById('next-stage-btn');
 const addRowBtn = document.getElementById('add-row-btn');
 const dedupeBtn = document.getElementById('dedupe-btn');
 const downloadCsvBtn = document.getElementById('download-csv-btn');
@@ -29,7 +32,7 @@ const EDIT_FIELDS = [
   { key: 'target_product', label: 'Product', type: 'text' },
   { key: 'target_cross_price_product', label: 'Cross-price product', type: 'text' },
   // options filled in at load time from /api/food-groups (see loadFoodGroups) —
-  // a fixed 8-value vocab, not something typed per-project like the fields above.
+  // Chen et al. 9 product groups, not something typed per-project.
   { key: 'target_food_group', label: 'Food group', type: 'select', options: [] },
   { key: 'target_cross_price_food_group', label: 'Cross-price food group', type: 'select', options: [] },
   { key: 'paper_elasticity_wording_raw', label: 'Paper elasticity wording', type: 'text' },
@@ -56,6 +59,26 @@ const EDIT_FIELDS = [
   { key: 'n_units', label: 'N (units)', type: 'number' },
   { key: 'data_source', label: 'Data source', type: 'text' },
   { key: 'source_type', label: 'Source type', type: 'select', options: ['table', 'text', 'figure'] },
+  // Chen et al. meta-regression covariates
+  { key: 'real_per_capita_income', label: 'Real per capita income', type: 'number' },
+  { key: 'budget_share', label: 'Budget share', type: 'number' },
+  { key: 'data_level', label: 'Data level', type: 'select', options: ['household_individual', 'aggregate'] },
+  { key: 'geographic_scope', label: 'Geographic scope', type: 'select', options: ['national', 'regional'] },
+  { key: 'urban_rural', label: 'Urban / rural', type: 'select', options: ['both', 'urban_only', 'rural_only'] },
+  { key: 'data_type', label: 'Data type', type: 'select', options: ['cross_section', 'time_series', 'pooled', 'panel'] },
+  { key: 'price_measure', label: 'Price measure', type: 'select', options: ['actual_prices', 'unit_values'] },
+  { key: 'conditioning', label: 'Conditioning', type: 'select', options: ['unconditional', 'conditional_food', 'conditional_animal', 'conditional_grain'] },
+  { key: 'budgeting_stages', label: 'Budgeting stages', type: 'select', options: ['single_stage', 'multi_stage'] },
+  { key: 'demand_system', label: 'Demand system', type: 'select', options: ['none', 'les_qes', 'aids', 'quaids', 'translog', 'linquad', 'rotterdam'] },
+  { key: 'estimation_method', label: 'Estimation method', type: 'select', options: ['ols', 'ml', 'sur', 'gls', 'other'] },
+  { key: 'demographic_controls', label: 'Demographic controls', type: 'bool' },
+  { key: 'publication_status', label: 'Publication status', type: 'select', options: ['unpublished', 'published'] },
+  { key: 'study_language', label: 'Study language', type: 'select', options: ['english', 'other'] },
+  { key: 'n_products_in_demand_system', label: 'N products in demand system', type: 'number' },
+  { key: 'elasticity_form', label: 'Elasticity form', type: 'select', options: ['marshallian', 'hicksian', 'both', 'unknown'] },
+  { key: 'group_expenditure_elasticity', label: 'Group expenditure elasticity', type: 'number' },
+  { key: 'group_own_price_elasticity', label: 'Group own-price elasticity', type: 'number' },
+  { key: 'within_group_budget_share', label: 'Within-group budget share', type: 'number' },
   { key: 'requires_review', label: 'Requires review', type: 'bool' },
   { key: 'review_reason', label: 'Review reasons (comma-separated)', type: 'text_list' },
 ];
@@ -93,16 +116,28 @@ async function loadPapers() {
     const stateRes = await fetch('/api/pipeline/state');
     const state = await stateRes.json();
     extractBtn.textContent = state.main_ai_done ? 'Update extraction' : 'Run extraction over detected chunks';
+    updateNextStageButton(!!state.main_ai_done);
   } catch (e) {
     // leave button label as-is if the state endpoint is unreachable
   }
 }
+
+function updateNextStageButton(mainAiDone) {
+  const canOpen = !!mainAiDone || allRecords.length > 0;
+  nextStageBtn.disabled = !canOpen;
+  nextStageBtn.title = canOpen ? '' : 'Run extraction first';
+}
+
+nextStageBtn.addEventListener('click', () => {
+  if (!nextStageBtn.disabled) window.location.href = '/dashboard';
+});
 
 async function loadRecords() {
   const res = await fetch('/api/main-ai/records');
   const data = await res.json();
   allRecords = data.records || [];
   renderTable();
+  updateNextStageButton(false); // unlocks if records already exist even before state refresh
 }
 
 function matchingRecords() {
@@ -357,6 +392,20 @@ function detailRow(r) {
     ['Model type', r.model_type], ['Country/region', r.countries_region],
     ['Time period', fmtTimePeriod(r.time_period)], ['Frequency', r.frequency],
     ['N (obs)', r.n_obs], ['N (units)', r.n_units], ['Data source', r.data_source],
+    ['Real per capita income', r.real_per_capita_income],
+    ['Budget share', r.budget_share],
+    ['Data level', r.data_level], ['Geographic scope', r.geographic_scope],
+    ['Urban / rural', r.urban_rural], ['Data type', r.data_type],
+    ['Price measure', r.price_measure], ['Conditioning', r.conditioning],
+    ['Budgeting stages', r.budgeting_stages], ['Demand system', r.demand_system],
+    ['Estimation method', r.estimation_method],
+    ['Demographic controls', r.demographic_controls === null || r.demographic_controls === undefined ? '–' : (r.demographic_controls ? 'yes' : 'no')],
+    ['Publication status', r.publication_status], ['Study language', r.study_language],
+    ['N products in demand system', r.n_products_in_demand_system],
+    ['Elasticity form', r.elasticity_form],
+    ['Group expenditure elasticity', r.group_expenditure_elasticity],
+    ['Group own-price elasticity', r.group_own_price_elasticity],
+    ['Within-group budget share', r.within_group_budget_share],
     ['Source', [r.source_type, r.source_location && r.source_location.row ? `row: ${r.source_location.row}` : null,
                 r.source_location && r.source_location.column ? `col: ${r.source_location.column}` : null,
                 r.source_location && r.source_location.page ? `p.${r.source_location.page}` : null]
@@ -492,20 +541,39 @@ function hideProgressBar() {
   extractProgress.hidden = true;
 }
 
+function setPauseButton(paused) {
+  pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+  pauseBtn.classList.toggle('is-paused', paused);
+  pauseBtn.disabled = false;
+}
+
 function applyExtractProgress(p) {
   const done = p.completed != null ? p.completed : p.extracted;
   const pct = p.total ? Math.round(100 * done / p.total) : 0;
   extractProgressFill.style.width = `${pct}%`;
-  extractProgressLabel.textContent = p.paper_id
-    ? `Working on "${p.paper_id}" — ${done}/${p.total} completed (${p.records_found} records so far) — ${pct}%`
-    : `${done}/${p.total} completed (${p.records_found} records so far) — ${pct}%`;
-  extractStatus.textContent = `Extracting… ${done}/${p.total} chunks done`;
-  extractStatus.classList.add('busy');
+  setPauseButton(!!p.paused);
+  if (p.paused) {
+    extractProgressLabel.textContent = `Paused — ${done}/${p.total} completed (${p.records_found} records so far) — ${pct}%`;
+    extractStatus.textContent = `Paused. ${done}/${p.total} chunks done so far.`;
+    extractStatus.classList.remove('busy');
+  } else {
+    extractProgressLabel.textContent = p.paper_id
+      ? `Working on "${p.paper_id}" — ${done}/${p.total} completed (${p.records_found} records so far) — ${pct}%`
+      : `${done}/${p.total} completed (${p.records_found} records so far) — ${pct}%`;
+    extractStatus.textContent = `Extracting… ${done}/${p.total} chunks done`;
+    extractStatus.classList.add('busy');
+  }
 }
 
 function finishExtractUI(finalProgress) {
   hideProgressBar();
-  if (finalProgress.error) {
+  pauseBtn.hidden = true;
+  stopBtn.hidden = true;
+  stopBtn.disabled = false;
+  if (finalProgress.stopped) {
+    extractStatus.textContent = finalProgress.error
+      || `Stopped — ${finalProgress.extracted || finalProgress.completed || 0}/${finalProgress.total || 0} chunks done so far. Click Run to start a fresh extraction on the current corpus.`;
+  } else if (finalProgress.error) {
     extractStatus.textContent = `${finalProgress.error} (${finalProgress.extracted}/${finalProgress.total} chunks completed before the error — already-extracted chunks won't be redone if you retry).`;
   } else {
     const dupNote = finalProgress.duplicates_removed
@@ -515,6 +583,9 @@ function finishExtractUI(finalProgress) {
   }
   extractStatus.classList.remove('busy');
   extractBtn.disabled = false;
+  if (!finalProgress.stopped && !finalProgress.error) {
+    updateNextStageButton(true);
+  }
 }
 
 // Extraction runs in a detached subprocess (see stage_jobs / job_runner).
@@ -544,6 +615,8 @@ async function pollUntilExtractionDone() {
 async function attachToRunningExtraction() {
   extractBtn.disabled = true;
   showProgressBar();
+  pauseBtn.hidden = false;
+  stopBtn.hidden = false;
   extractStatus.textContent = 'Extracting…';
   extractStatus.classList.add('busy');
   try {
@@ -552,6 +625,8 @@ async function attachToRunningExtraction() {
     await Promise.all([loadPapers(), loadRecords()]);
   } catch (e) {
     hideProgressBar();
+    pauseBtn.hidden = true;
+  stopBtn.hidden = true;
     extractStatus.textContent = 'Extraction failed — check the server log.';
     extractStatus.classList.remove('busy');
     extractBtn.disabled = false;
@@ -559,11 +634,49 @@ async function attachToRunningExtraction() {
   }
 }
 
+
+stopBtn.addEventListener('click', async () => {
+  if (!confirm('Stop this run? Progress so far is kept, but the job will not continue.')) return;
+  stopBtn.disabled = true;
+  pauseBtn.disabled = true;
+  try {
+    const res = await fetch('/api/main-ai/extract/stop', { method: 'POST' });
+    const p = await res.json();
+    if (!res.ok) {
+      alert(p.error || 'Could not stop the job.');
+      stopBtn.disabled = false;
+      pauseBtn.disabled = false;
+      return;
+    }
+    // Polling loop will see running:false and finish the UI.
+  } catch (e) {
+    stopBtn.disabled = false;
+    pauseBtn.disabled = false;
+  }
+});
+
+pauseBtn.addEventListener('click', async () => {
+  pauseBtn.disabled = true;
+  const isPaused = pauseBtn.classList.contains('is-paused');
+  const endpoint = isPaused ? '/api/main-ai/extract/resume' : '/api/main-ai/extract/pause';
+  try {
+    const res = await fetch(endpoint, { method: 'POST' });
+    const p = await res.json();
+    if (res.ok) applyExtractProgress(p);
+    else pauseBtn.disabled = false;
+  } catch (e) {
+    pauseBtn.disabled = false;
+  }
+});
+
 extractBtn.addEventListener('click', async () => {
   extractBtn.disabled = true;
   extractStatus.textContent = 'Extracting…';
   extractStatus.classList.add('busy');
   showProgressBar();
+  pauseBtn.hidden = false;
+  stopBtn.hidden = false;
+  setPauseButton(false);
   try {
     const res = await fetch('/api/main-ai/extract', { method: 'POST' });
     const data = await res.json();
@@ -577,6 +690,8 @@ extractBtn.addEventListener('click', async () => {
         return;
       }
       hideProgressBar();
+      pauseBtn.hidden = true;
+  stopBtn.hidden = true;
       extractStatus.textContent = data.error || 'Extraction failed.';
       extractStatus.classList.remove('busy');
       extractBtn.disabled = false;
@@ -588,6 +703,8 @@ extractBtn.addEventListener('click', async () => {
     await Promise.all([loadPapers(), loadRecords()]);
   } catch (e) {
     hideProgressBar();
+    pauseBtn.hidden = true;
+  stopBtn.hidden = true;
     extractStatus.textContent = 'Extraction failed — check the server log.';
     extractStatus.classList.remove('busy');
     extractBtn.disabled = false;

@@ -20,14 +20,13 @@ import pandas as pd
 # the regression formula. "derived" fields are computed from raw record
 # fields (e.g. abs_coefficient from coefficient) rather than being a literal
 # key already present on the record dict — see _row_from_record.
-# Standard 8-group food classification (mirrors meta_pipeline.llm.LLMClient
+# Chen et al. (2016) nine product groups (mirrors meta_pipeline.llm.LLMClient
 # ._FOOD_GROUPS / models.FoodGroup exactly) — duplicated here as a small,
 # stable constant rather than importing meta_pipeline.llm, which would pull
-# in the anthropic/openai/google SDKs just for an 8-item tuple.
+# in the anthropic/openai/google SDKs just for a 9-item tuple.
 FOOD_GROUPS = (
-    "Bread and cereals", "Meat", "Fish and seafood", "Dairy products",
-    "Fats and oils", "Fruit and vegetables", "Beverages and tobacco",
-    "Other food products",
+    "Grains and vegetables", "Meat and eggs", "Edible oil",
+    "Aquatic products", "Fruits", "Sugar", "Dairy", "Tobacco", "Alcohol",
 )
 FIELDS: Dict[str, Dict[str, Any]] = {
     "coefficient":                 {"label": "Coefficient (elasticity value)", "kind": "numeric"},
@@ -36,6 +35,12 @@ FIELDS: Dict[str, Dict[str, Any]] = {
     "p_value":                     {"label": "P-value", "kind": "numeric"},
     "n_obs":                       {"label": "N (observations)", "kind": "numeric"},
     "n_units":                     {"label": "N (units)", "kind": "numeric"},
+    "real_per_capita_income":      {"label": "Real per capita income", "kind": "numeric"},
+    "budget_share":                {"label": "Budget share", "kind": "numeric"},
+    "group_expenditure_elasticity": {"label": "Group expenditure elasticity", "kind": "numeric"},
+    "group_own_price_elasticity":  {"label": "Group own-price elasticity", "kind": "numeric"},
+    "within_group_budget_share":   {"label": "Within-group budget share", "kind": "numeric"},
+    "n_products_in_demand_system": {"label": "N products in demand system", "kind": "numeric"},
     "time_period_midpoint":        {"label": "Sample midpoint year", "kind": "numeric", "derived": True},
     "time_period_span":            {"label": "Sample period length (yrs)", "kind": "numeric", "derived": True},
     "target_elasticity_type":      {"label": "Elasticity type", "kind": "categorical"},
@@ -53,8 +58,35 @@ FIELDS: Dict[str, Dict[str, Any]] = {
     "countries_region":            {"label": "Country / region", "kind": "categorical"},
     "frequency":                   {"label": "Data frequency", "kind": "categorical"},
     "data_source":                 {"label": "Data source", "kind": "categorical"},
+    "data_level":                  {"label": "Data level", "kind": "categorical",
+                                    "options": ["household_individual", "aggregate"]},
+    "geographic_scope":            {"label": "Geographic scope", "kind": "categorical",
+                                    "options": ["national", "regional"]},
+    "urban_rural":                 {"label": "Urban / rural", "kind": "categorical",
+                                    "options": ["both", "urban_only", "rural_only"]},
+    "data_type":                   {"label": "Data type", "kind": "categorical",
+                                    "options": ["cross_section", "time_series", "pooled", "panel"]},
+    "price_measure":               {"label": "Price measure", "kind": "categorical",
+                                    "options": ["actual_prices", "unit_values"]},
+    "conditioning":                {"label": "Conditioning", "kind": "categorical",
+                                    "options": ["unconditional", "conditional_food",
+                                                "conditional_animal", "conditional_grain"]},
+    "budgeting_stages":            {"label": "Budgeting stages", "kind": "categorical",
+                                    "options": ["single_stage", "multi_stage"]},
+    "demand_system":               {"label": "Demand system", "kind": "categorical",
+                                    "options": ["none", "les_qes", "aids", "quaids",
+                                                "translog", "linquad", "rotterdam"]},
+    "estimation_method":           {"label": "Estimation method", "kind": "categorical",
+                                    "options": ["ols", "ml", "sur", "gls", "other"]},
+    "elasticity_form":             {"label": "Elasticity form", "kind": "categorical",
+                                    "options": ["marshallian", "hicksian", "both", "unknown"]},
+    "publication_status":          {"label": "Publication status", "kind": "categorical",
+                                    "options": ["unpublished", "published"]},
+    "study_language":              {"label": "Study language", "kind": "categorical",
+                                    "options": ["english", "other"]},
     "paper_id":                    {"label": "Paper (fixed effect)", "kind": "categorical"},
     "elasticity_is_raw":           {"label": "Elasticity is raw (vs. derived)", "kind": "boolean"},
+    "demographic_controls":        {"label": "Demographic controls", "kind": "boolean"},
     "requires_review":             {"label": "Flagged for review", "kind": "boolean"},
     "manually_edited":             {"label": "Manually edited", "kind": "boolean"},
 }
@@ -94,6 +126,12 @@ def _row_from_record(r: dict) -> dict:
     row["p_value"] = r.get("p_value")
     row["n_obs"] = r.get("n_obs")
     row["n_units"] = r.get("n_units")
+    row["real_per_capita_income"] = r.get("real_per_capita_income")
+    row["budget_share"] = r.get("budget_share")
+    row["group_expenditure_elasticity"] = r.get("group_expenditure_elasticity")
+    row["group_own_price_elasticity"] = r.get("group_own_price_elasticity")
+    row["within_group_budget_share"] = r.get("within_group_budget_share")
+    row["n_products_in_demand_system"] = r.get("n_products_in_demand_system")
 
     tp = r.get("time_period") or {}
     start, end = tp.get("start"), tp.get("end")
@@ -111,10 +149,15 @@ def _row_from_record(r: dict) -> dict:
               "target_food_group", "target_cross_price_food_group",
               "match_type", "variable_role", "estimate_type", "specification_status",
               "unit_source", "source_type", "model_type", "countries_region",
-              "frequency", "data_source", "paper_id"):
+              "frequency", "data_source", "paper_id",
+              "data_level", "geographic_scope", "urban_rural", "data_type",
+              "price_measure", "conditioning", "budgeting_stages", "demand_system",
+              "estimation_method", "elasticity_form", "publication_status",
+              "study_language"):
         row[f] = r.get(f)
 
     row["elasticity_is_raw"] = r.get("elasticity_is_raw")
+    row["demographic_controls"] = r.get("demographic_controls")
     row["requires_review"] = r.get("requires_review")
     row["manually_edited"] = bool(r.get("manually_edited"))
     return row

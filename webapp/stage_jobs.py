@@ -21,11 +21,12 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Repo root on path so meta_pipeline imports work whether we're launched
 # from Flask (webapp/ on path) or as job_runner.py (repo root on path).
@@ -44,10 +45,20 @@ JOB_RUNNER = _WEBAPP_DIR / "job_runner.py"
 
 STAGES = ("classify", "detect", "extract")
 
+# When an earlier stage is re-started, these later jobs (and their paused
+# progress files) are obsolete and must be stopped/cleared.
+DOWNSTREAM_STAGES: Dict[str, Tuple[str, ...]] = {
+    "classify": ("detect", "extract"),
+    "detect": ("extract",),
+    "extract": (),
+}
+
 PROGRESS_DEFAULTS: Dict[str, dict] = {
     "classify": {
         "running": False,
         "paused": False,
+        "stop_requested": False,
+        "stopped": False,
         "pid": None,
         "paper_id": None,
         "chunk_index": 0,
@@ -59,6 +70,9 @@ PROGRESS_DEFAULTS: Dict[str, dict] = {
     },
     "detect": {
         "running": False,
+        "paused": False,
+        "stop_requested": False,
+        "stopped": False,
         "pid": None,
         "paper_id": None,
         "chunk_index": 0,
@@ -70,6 +84,9 @@ PROGRESS_DEFAULTS: Dict[str, dict] = {
     },
     "extract": {
         "running": False,
+        "paused": False,
+        "stop_requested": False,
+        "stopped": False,
         "pid": None,
         "paper_id": None,
         "chunk_index": 0,
@@ -158,6 +175,121 @@ def write_progress(project_id: str, stage: str, data: dict) -> None:
     tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
     tmp.write_text(json.dumps(data))
     os.replace(tmp, path)
+
+
+class JobStopped(Exception):
+    """Raised inside a job loop when the user (or an upstream re-run) asked
+    the stage to stop. Callers catch it to exit cleanly before ``finally``."""
+
+
+def _wait_if_paused(project_id: str, stage: str, progress: dict,
+                    on_pause: Optional[Callable[[], None]] = None) -> None:
+    """Block between units of work while progress.paused is true.
+
+    Pause/resume is file-backed (``/pause`` and ``/resume`` flip the flag from
+    any gunicorn worker). ``/stop`` sets ``stop_requested`` and clears
+    ``paused`` so a paused job wakes and exits. Optional ``on_pause`` persists
+    intermediate results so a long pause doesn't leave unflushed work only in
+    memory.
+    """
+    while True:
+        live = read_progress(project_id, stage)
+        if live.get("stop_requested"):
+            progress["stop_requested"] = True
+            progress["paused"] = False
+            raise JobStopped()
+        if not live.get("paused"):
+            break
+        progress["paused"] = True
+        write_progress(project_id, stage, progress)
+        if on_pause:
+            on_pause()
+        time.sleep(0.5)
+    progress["paused"] = False
+
+
+def _job_pids(project_id: str, stage: str) -> List[int]:
+    """PIDs that might still own this stage job (progress pid and/or lock)."""
+    pids: List[int] = []
+    progress = read_progress(project_id, stage)
+    pid = progress.get("pid")
+    if isinstance(pid, int) and pid > 0:
+        pids.append(pid)
+    lock = lock_path(project_id, stage)
+    if lock.exists():
+        try:
+            lock_pid = int(lock.read_text().strip() or "0")
+        except ValueError:
+            lock_pid = 0
+        if lock_pid > 0 and lock_pid not in pids:
+            pids.append(lock_pid)
+    return pids
+
+
+def _signal_pid(pid: int, sig: signal.Signals) -> None:
+    try:
+        os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+
+
+def stop_job(project_id: str, stage: str, *, reason: Optional[str] = None) -> dict:
+    """Stop a running/paused stage job and reset its progress file.
+
+    Sets ``stop_requested`` (and clears ``paused``) so a cooperative job can
+    exit its loop, then SIGTERM/SIGKILL if the process is still alive. Always
+    leaves ``running=False`` so the UI doesn't keep showing a stale pause
+    from a superseded corpus.
+    """
+    if stage not in PROGRESS_DEFAULTS:
+        raise ValueError(f"unknown stage: {stage}")
+
+    progress = read_progress(project_id, stage)
+    progress["stop_requested"] = True
+    progress["paused"] = False
+    write_progress(project_id, stage, progress)
+
+    pids = _job_pids(project_id, stage)
+    # Give cooperative exit a moment (pause wake + loop check).
+    deadline = time.time() + 8.0
+    while time.time() < deadline and any(pid_alive(p) for p in pids):
+        time.sleep(0.2)
+        pids = _job_pids(project_id, stage)
+
+    for p in pids:
+        if pid_alive(p):
+            _signal_pid(p, signal.SIGTERM)
+    time.sleep(0.4)
+    for p in _job_pids(project_id, stage):
+        if pid_alive(p):
+            _signal_pid(p, signal.SIGKILL)
+
+    cleared = dict(PROGRESS_DEFAULTS[stage])
+    cleared["stopped"] = True
+    if reason:
+        cleared["error"] = reason
+    write_progress(project_id, stage, cleared)
+    _release_lock(project_id, stage)
+    return cleared
+
+
+def invalidate_downstream_jobs(project_id: str, stage: str,
+                               *, reason: Optional[str] = None) -> None:
+    """Kill/clear later-stage jobs whose inputs this stage just invalidated.
+
+    Fixes the stuck-pause case: Main AI paused on corpus A, user re-runs
+    Cheap/Detection AI on a smaller corpus — without this, extract progress
+    stays ``running+paused`` with the old totals.
+    """
+    msg = reason or "Cleared because an earlier pipeline stage was re-run."
+    for ds in DOWNSTREAM_STAGES.get(stage, ()):
+        stop_job(project_id, ds, reason=msg)
+
+
+def stop_all_jobs(project_id: str, *, reason: Optional[str] = None) -> None:
+    msg = reason or "Cleared because the corpus changed."
+    for stage in STAGES:
+        stop_job(project_id, stage, reason=msg)
 
 
 def pid_alive(pid: Optional[int]) -> bool:
@@ -347,12 +479,14 @@ def _record_from_estimate(raw: dict, chunk: dict, idx: int, meta: dict) -> dict:
     rec["pages_used"] = chunk.get("pages_used") or []
 
     meta = meta or {}
-    for field in ("model_type", "countries_region", "frequency", "n_obs", "n_units", "data_source"):
+    for field in ("model_type", "countries_region", "frequency", "n_obs", "n_units", "data_source",
+                  *LLMClient._CHEN_PAPER_FIELDS):
         if rec.get(field) is None:
             rec[field] = meta.get(field)
     tp = rec.get("time_period")
-    if not tp or (tp.get("start") is None and tp.get("end") is None):
+    if not tp or (isinstance(tp, dict) and tp.get("start") is None and tp.get("end") is None):
         rec["time_period"] = meta.get("time_period") or {"start": None, "end": None}
+    LLMClient._apply_chen_review_flags(rec)
     return rec
 
 
@@ -446,15 +580,10 @@ def run_classify_job(project_id: str) -> None:
     try:
         for i, c in enumerate(classifiable):
             # Pause between chunks (file-backed, so /pause from any worker works).
-            while True:
-                live = read_progress(project_id, "classify")
-                if not live.get("paused"):
-                    break
-                progress["paused"] = True
-                write_progress(project_id, "classify", progress)
-                _save_kept_chunks(out, all_chunks)
-                time.sleep(0.5)
-            progress["paused"] = False
+            _wait_if_paused(
+                project_id, "classify", progress,
+                on_pause=lambda: _save_kept_chunks(out, all_chunks),
+            )
             progress["paper_id"] = c["paper_id"]
             progress["chunk_index"] = i + 1
             write_progress(project_id, "classify", progress)
@@ -502,8 +631,13 @@ def run_classify_job(project_id: str) -> None:
 
         _save_kept_chunks(out, all_chunks)
         _discard_detection_results(out)
+    except JobStopped:
+        progress["stopped"] = True
+        _save_kept_chunks(out, all_chunks)
     finally:
         progress["running"] = False
+        progress["paused"] = False
+        progress["stop_requested"] = False
         write_progress(project_id, "classify", progress)
         _release_lock(project_id, "classify")
 
@@ -520,7 +654,7 @@ def run_detect_job(project_id: str) -> None:
     total = len(classifiable)
     progress = dict(PROGRESS_DEFAULTS["detect"])
     progress.update(
-        running=True, pid=os.getpid(),
+        running=True, paused=False, pid=os.getpid(),
         paper_id=classifiable[0]["paper_id"] if classifiable else None,
         chunk_index=0, total=total, screened=0, dropped=0, completed=0, error=None,
     )
@@ -543,6 +677,10 @@ def run_detect_job(project_id: str) -> None:
 
     try:
         for i, c in enumerate(classifiable):
+            _wait_if_paused(
+                project_id, "detect", progress,
+                on_pause=lambda: _save_kept_chunks(out, all_chunks),
+            )
             progress["paper_id"] = c["paper_id"]
             progress["chunk_index"] = i + 1
             write_progress(project_id, "detect", progress)
@@ -585,8 +723,13 @@ def run_detect_job(project_id: str) -> None:
 
         _save_kept_chunks(out, all_chunks)
         _discard_extraction_results(out)
+    except JobStopped:
+        progress["stopped"] = True
+        _save_kept_chunks(out, all_chunks)
     finally:
         progress["running"] = False
+        progress["paused"] = False
+        progress["stop_requested"] = False
         write_progress(project_id, "detect", progress)
         _release_lock(project_id, "detect")
 
@@ -602,7 +745,8 @@ def run_extract_job(project_id: str) -> None:
     records = _load_json(out / "records.json", [])
     progress = dict(PROGRESS_DEFAULTS["extract"])
     progress.update(
-        running=True, pid=os.getpid(),
+        running=True, paused=False, stop_requested=False, stopped=False,
+        pid=os.getpid(),
         paper_id=extractable[0]["paper_id"] if extractable else None,
         chunk_index=0, total=total, extracted=0, records_found=len(records),
         completed=0, duplicates_removed=0, error=None,
@@ -631,25 +775,33 @@ def run_extract_job(project_id: str) -> None:
         or paper_metadata_prompt.get("user", "").strip()
     )
     paper_metadata: dict = {}
-    if paper_metadata_configured:
-        paper_ids = sorted({c["paper_id"] for c in extractable})
-        progress["paper_id"] = "paper metadata…"
-        write_progress(project_id, "extract", progress)
-        for paper_id in paper_ids:
-            try:
-                meta = llm.extract_paper_metadata(
-                    abstracts.get(paper_id), methodology_text.get(paper_id, ""),
-                )
-            except Exception:
-                meta = None
-            if meta:
-                paper_metadata[paper_id] = meta
-
     SAVE_EVERY = 3
     extracted_chunks = 0
 
+    def _flush_extract():
+        _save_kept_chunks(out, all_chunks)
+        _write_json(out / "records.json", records)
+
     try:
+        if paper_metadata_configured:
+            paper_ids = sorted({c["paper_id"] for c in extractable})
+            progress["paper_id"] = "paper metadata…"
+            write_progress(project_id, "extract", progress)
+            for paper_id in paper_ids:
+                _wait_if_paused(project_id, "extract", progress)
+                progress["paper_id"] = f"paper metadata… {paper_id}"
+                write_progress(project_id, "extract", progress)
+                try:
+                    meta = llm.extract_paper_metadata(
+                        abstracts.get(paper_id), methodology_text.get(paper_id, ""),
+                    )
+                except Exception:
+                    meta = None
+                if meta:
+                    paper_metadata[paper_id] = meta
+
         for i, c in enumerate(extractable):
+            _wait_if_paused(project_id, "extract", progress, on_pause=_flush_extract)
             progress["paper_id"] = c["paper_id"]
             progress["chunk_index"] = i + 1
             write_progress(project_id, "extract", progress)
@@ -697,8 +849,14 @@ def run_extract_job(project_id: str) -> None:
         _write_json(out / "records.json", records)
         progress["duplicates_removed"] = deduped_count
         progress["records_found"] = len(records)
+    except JobStopped:
+        progress["stopped"] = True
+        _save_kept_chunks(out, all_chunks)
+        _write_json(out / "records.json", records)
     finally:
         progress["running"] = False
+        progress["paused"] = False
+        progress["stop_requested"] = False
         write_progress(project_id, "extract", progress)
         _release_lock(project_id, "extract")
 
@@ -716,6 +874,9 @@ def start_job(project_id: str, stage: str, total: int, paper_id: Optional[str] =
     a live job is already running for this stage/project."""
     if stage not in JOB_FUNCS:
         raise ValueError(f"unknown stage: {stage}")
+    # Later stages (and any paused Main AI run) are obsolete once this stage
+    # is re-started on a new/changed corpus.
+    invalidate_downstream_jobs(project_id, stage)
     reconcile_stale_job(project_id, stage)
     if job_is_running(project_id, stage):
         raise RuntimeError(f"an {stage} run is already in progress")
@@ -726,9 +887,10 @@ def start_job(project_id: str, stage: str, total: int, paper_id: Optional[str] =
     progress.update(
         running=True, pid=None, paper_id=paper_id,
         chunk_index=0, total=total, completed=0, error=None,
+        paused=False, stop_requested=False, stopped=False,
     )
     if stage == "classify":
-        progress.update(paused=False, classified=0, parse_failed=0)
+        progress.update(classified=0, parse_failed=0)
     elif stage == "detect":
         progress.update(screened=0, dropped=0)
     else:

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Dashboard &middot; Meta-Analysis Pipeline</title>
+<title>Dashboard &middot; MetaExtract</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
@@ -13,28 +13,42 @@
 
 <div class="dash-layout">
   <div class="dash-header">
-    <div class="dash-title">Key findings</div>
-    <div class="dash-sub">A summary of the corpus, the extracted elasticity dataset, and any regression specifications run so far.</div>
+    <div class="dash-title">Meta Analysis Results</div>
+    <div class="dash-sub">
+      Tables 1–4 from the extracted elasticity dataset. Filter by country to
+      recompute descriptives, the variance-equation meta-regression, and predictions.
+    </div>
   </div>
 
   <div class="dash-filter-bar" id="dash-filter-bar"></div>
-
-  <div class="dash-cards" id="dash-cards"></div>
+  <div class="dash-meta" id="dash-meta"></div>
 
   <div class="dash-section">
-    <div class="dash-section-title">Coverage</div>
-    <div class="dash-coverage-grid" id="dash-coverage"></div>
+    <div class="dash-section-title">Table 1: Elasticity summary by product</div>
+    <div class="dash-section-sub">Mean, SD, min, and max for income and Marshallian own-price elasticities (as extracted).</div>
+    <div class="chen-table-wrap" id="table1-wrap"></div>
   </div>
 
   <div class="dash-section">
-    <div class="dash-section-title">Regression results</div>
-    <div class="regression-table-wrap" id="dash-reg-wrap">
-      <div class="manuscript-empty" id="dash-reg-empty">
-        <div class="big">No regressions run yet</div>
-        <div>Build and run a model on the <a href="/regression">Regression</a> page — saved specifications will appear here as columns.</div>
-      </div>
-      <table class="reg-table" id="dash-reg-table" hidden></table>
+    <div class="dash-section-title">Table 2: Sample characteristics</div>
+    <div class="dash-section-sub">Mean real per capita income and share of estimates by study / model covariates.</div>
+    <div id="table2-wrap"></div>
+  </div>
+
+  <div class="dash-section">
+    <div class="dash-section-title">Table 3: Meta-regression results</div>
+    <div class="dash-section-sub">
+      Product × ln(income) interactions and study covariates; WLS weights from
+      Chen’s variance equation (ln Var ∼ ln N, ln J, published, language).
+      Intercept and product dummies are estimated but hidden here.
     </div>
+    <div id="table3-wrap"></div>
+  </div>
+
+  <div class="dash-section">
+    <div class="dash-section-title">Table 4: Predicted elasticities</div>
+    <div class="dash-section-sub">Income and own-price predictions at the filtered sample’s mean ln(Y).</div>
+    <div class="chen-table-wrap" id="table4-wrap"></div>
   </div>
 </div>
 

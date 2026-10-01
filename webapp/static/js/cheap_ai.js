@@ -6,6 +6,7 @@ const classifyProgress = document.getElementById('classify-progress');
 const classifyProgressFill = document.getElementById('classify-progress-fill');
 const classifyProgressLabel = document.getElementById('classify-progress-label');
 const pauseBtn = document.getElementById('pause-btn');
+const stopBtn = document.getElementById('stop-btn');
 const nextStageBtn = document.getElementById('next-stage-btn');
 
 let papers = [];
@@ -231,6 +232,27 @@ async function pollUntilClassifyDone() {
   }
 }
 
+
+stopBtn.addEventListener('click', async () => {
+  if (!confirm('Stop this run? Progress so far is kept, but the job will not continue.')) return;
+  stopBtn.disabled = true;
+  pauseBtn.disabled = true;
+  try {
+    const res = await fetch('/api/cheap-ai/classify/stop', { method: 'POST' });
+    const p = await res.json();
+    if (!res.ok) {
+      alert(p.error || 'Could not stop the job.');
+      stopBtn.disabled = false;
+      pauseBtn.disabled = false;
+      return;
+    }
+    // Polling loop will see running:false and finish the UI.
+  } catch (e) {
+    stopBtn.disabled = false;
+    pauseBtn.disabled = false;
+  }
+});
+
 pauseBtn.addEventListener('click', async () => {
   pauseBtn.disabled = true;
   const isPaused = pauseBtn.classList.contains('is-paused');
@@ -251,6 +273,7 @@ classifyBtn.addEventListener('click', async () => {
   classifyStatus.classList.add('busy');
   showProgressBar();
   pauseBtn.hidden = false;
+  stopBtn.hidden = false;
   setPauseButton(false);
   try {
     const res = await fetch('/api/cheap-ai/classify', { method: 'POST' });
@@ -260,7 +283,11 @@ classifyBtn.addEventListener('click', async () => {
         const finalProgress = await pollUntilClassifyDone();
         hideProgressBar();
         pauseBtn.hidden = true;
-        if (finalProgress.error) {
+  stopBtn.hidden = true;
+        if (finalProgress.stopped) {
+      classifyStatus.textContent = finalProgress.error
+        || `Stopped — ${finalProgress.completed || 0}/${finalProgress.total || 0} completed.`;
+    } else if (finalProgress.error) {
           classifyStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.classified}/${finalProgress.total} completed before the error).`;
         } else {
           classifyStatus.textContent = finalProgress.parse_failed
@@ -274,6 +301,7 @@ classifyBtn.addEventListener('click', async () => {
       }
       hideProgressBar();
       pauseBtn.hidden = true;
+  stopBtn.hidden = true;
       classifyStatus.textContent = data.error || 'Classification failed.';
       classifyStatus.classList.remove('busy');
       classifyBtn.disabled = false;
@@ -283,7 +311,11 @@ classifyBtn.addEventListener('click', async () => {
     const finalProgress = await pollUntilClassifyDone();
     hideProgressBar();
     pauseBtn.hidden = true;
-    if (finalProgress.error) {
+  stopBtn.hidden = true;
+    if (finalProgress.stopped) {
+      classifyStatus.textContent = finalProgress.error
+        || `Stopped — ${finalProgress.completed || 0}/${finalProgress.total || 0} completed.`;
+    } else if (finalProgress.error) {
       classifyStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.classified}/${finalProgress.total} completed before the error).`;
     } else {
       classifyStatus.textContent = finalProgress.parse_failed
@@ -295,6 +327,7 @@ classifyBtn.addEventListener('click', async () => {
   } catch (e) {
     hideProgressBar();
     pauseBtn.hidden = true;
+  stopBtn.hidden = true;
     classifyStatus.textContent = 'Classification failed — check the server log.';
     classifyStatus.classList.remove('busy');
     await loadPapers();
@@ -310,11 +343,16 @@ async function resumeClassifyIfRunning() {
     classifyBtn.disabled = true;
     showProgressBar();
     pauseBtn.hidden = false;
+  stopBtn.hidden = false;
     applyClassifyProgress(p);
     const finalProgress = await pollUntilClassifyDone();
     hideProgressBar();
     pauseBtn.hidden = true;
-    if (finalProgress.error) {
+  stopBtn.hidden = true;
+    if (finalProgress.stopped) {
+      classifyStatus.textContent = finalProgress.error
+        || `Stopped — ${finalProgress.completed || 0}/${finalProgress.total || 0} completed.`;
+    } else if (finalProgress.error) {
       classifyStatus.textContent = `${finalProgress.error} (${finalProgress.completed || finalProgress.classified}/${finalProgress.total} completed before the error).`;
     } else {
       classifyStatus.textContent = finalProgress.parse_failed
