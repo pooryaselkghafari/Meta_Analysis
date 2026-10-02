@@ -2,10 +2,12 @@
 Stage 2 classification, Stage 3 detection, Stage 4 extraction, Stage 5
 validation.
 
-Stored as plain JSON at the project root (`prompts_settings.json`), edited
-from the Settings page. `prompts.py` reads through this module, so the actual
-prompt text lives in one editable place rather than hardcoded in Python —
-that's the whole point of exposing it in the UI.
+Stored as plain JSON at the **repo root** (`prompts_settings.json`) — shared
+by every project. Papers / targets / records stay per-project; prompt text is
+global so you edit it once on the Settings page.
+
+`prompts.py` reads through this module, so the actual prompt text lives in
+one editable place rather than hardcoded in Python.
 
 Placeholders use a literal {{token}} syntax rather than str.format, on
 purpose: prompt authors will often paste literal JSON (schema examples,
@@ -20,19 +22,20 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# Default location before any project has been activated; repointed at the
-# active project's own directory via set_base_dir(), same reasoning as
-# settings_store — each project keeps its own prompt templates.
+# Global across all projects — not under projects/<id>/.
 PROMPTS_PATH = PROJECT_ROOT / "prompts_settings.json"
 
 _STAGES = ("classification", "detection", "paper_metadata", "extraction", "validation")
 
 
 def set_base_dir(base_dir) -> None:
-    """Repoint PROMPTS_PATH at `<base_dir>/prompts_settings.json` — called by
-    the webapp when the active project changes."""
+    """No-op kept for call-site compatibility.
+
+    Prompts are global at the repo root. Older code still passes a project
+    directory; ignore that and keep PROMPTS_PATH pointed at the shared file.
+    """
     global PROMPTS_PATH
-    PROMPTS_PATH = Path(base_dir) / "prompts_settings.json"
+    PROMPTS_PATH = PROJECT_ROOT / "prompts_settings.json"
 
 # Which {{tokens}} each stage's templates can reference — surfaced to the
 # Settings page so prompt authors know what's available without reading code.

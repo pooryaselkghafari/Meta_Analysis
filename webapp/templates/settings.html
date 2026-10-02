@@ -15,7 +15,7 @@
   <div class="settings-intro">
     <h1>AI settings</h1>
     <p>Three independently configurable AI slots, one per pipeline role. Each can use a model from any of three providers &mdash; Anthropic (Claude), OpenAI (GPT), or Google (Gemini) &mdash; with its own API key and its own effort/thinking level (trading response thoroughness for token/latency cost). Effort isn't supported by every model &mdash; the dropdown only offers levels the selected model actually accepts, and shows "not applicable" otherwise.</p>
-    <p class="settings-warning">Keys are stored in plain text in <code>ai_settings.json</code> at the project root, for local use only &mdash; it's already excluded via <code>.gitignore</code>. Each slot keeps a separate key per provider, so switching a slot's model between providers won't overwrite the other provider's saved key. Leave a key field blank to keep the currently saved key for that provider.</p>
+    <p class="settings-warning">Keys and prompts are <strong>global</strong> across all projects — stored in plain text in <code>ai_settings.json</code> and <code>prompts_settings.json</code> at the repo root (already in <code>.gitignore</code>). Papers and extraction results stay per-project. Each AI slot keeps a separate key per provider, so switching a slot's model between providers won't overwrite the other provider's saved key. Leave a key field blank to keep the currently saved key for that provider.</p>
   </div>
 
   <form id="settings-form">

@@ -1,12 +1,13 @@
 """Persistence for the three AI slots (cheap / main / validation) configured
 from the webapp's Settings page.
 
-Stored as plain JSON at the project root (`ai_settings.json`, next to
-`input_papers/`), *not* inside the `meta_pipeline` package, so it's easy to
-gitignore and easy to find. This file will contain API keys in plain text —
-that's an accepted tradeoff for a local, single-user tool, but it should never
-be committed to version control (see the .gitignore entry added alongside
-this module) or shared.
+Stored as plain JSON at the **repo root** (`ai_settings.json`) — shared by
+every project. Papers, targets, and extraction output stay per-project;
+API keys and model choices are global so you configure them once.
+
+This file will contain API keys in plain text — that's an accepted tradeoff
+for a local, single-user tool, but it should never be committed to version
+control (see the .gitignore entry) or shared.
 
 Each slot can point at a model from any of the three supported providers
 (Anthropic, OpenAI, Google), and each provider needs its own kind of API key.
@@ -28,20 +29,21 @@ from typing import Any, Dict
 from .config import ModelConfig, provider_for, default_api_key_env_for
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-# Default location before any project has been activated; the webapp repoints
-# this at the active project's own directory via set_base_dir() on startup
-# and whenever the user switches projects, so each project keeps its own
-# separate API keys/model choices rather than sharing one global file.
+# Global across all projects — not under projects/<id>/.
 SETTINGS_PATH = PROJECT_ROOT / "ai_settings.json"
 
 _SLOTS = ("cheap", "main", "validation")
 
 
 def set_base_dir(base_dir) -> None:
-    """Repoint SETTINGS_PATH at `<base_dir>/ai_settings.json` — called by the
-    webapp when the active project changes."""
+    """No-op kept for call-site compatibility.
+
+    Settings are global at the repo root. Older code (and stage jobs) still
+    call this with a project directory; ignore that and keep SETTINGS_PATH
+    pointed at the shared file.
+    """
     global SETTINGS_PATH
-    SETTINGS_PATH = Path(base_dir) / "ai_settings.json"
+    SETTINGS_PATH = PROJECT_ROOT / "ai_settings.json"
 
 
 def _read_raw() -> Dict[str, Any]:

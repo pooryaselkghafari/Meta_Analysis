@@ -138,15 +138,14 @@ def _set_active_project_id(project_id: str) -> None:
 
 def _migrate_legacy_root_data() -> None:
     """One-time migration for installs that predate the project system: if
-    projects/ doesn't exist yet but old root-level data does (input_papers/,
-    output/, ai_settings.json, etc. sitting directly at the repo root), move
-    it into projects/default/ instead of losing it, and make "default" the
-    active project. No-ops (does nothing further) once projects/ exists."""
+    projects/ doesn't exist yet but old root-level *project* data does
+    (input_papers/, output/, targets.json, ontology.json), move it into
+    projects/default/. API keys and prompts stay at the repo root (global).
+    No-ops once projects/ exists."""
     if PROJECTS_DIR.exists():
         return
     legacy_paths = [
         BASE_DIR / "input_papers", BASE_DIR / "output",
-        BASE_DIR / "ai_settings.json", BASE_DIR / "prompts_settings.json",
         BASE_DIR / "targets.json", BASE_DIR / "ontology.json",
     ]
     has_legacy_data = any(p.exists() for p in legacy_paths)
@@ -163,8 +162,10 @@ def _migrate_legacy_root_data() -> None:
 
 
 def _apply_active_project() -> None:
-    """Recompute every path global from whichever project is currently
-    active, and repoint settings_store/prompts_store at the same directory.
+    """Recompute every *project-local* path global from whichever project is
+    currently active. API keys and prompts are global (repo-root
+    ``ai_settings.json`` / ``prompts_settings.json``) and are not rebound
+    here — ``settings_store`` / ``prompts_store`` always point at the root.
     Called on startup and immediately after creating/switching projects."""
     global INPUT_DIR, OUTPUT_DIR, THUMB_DIR, TARGETS_PATH, ONTOLOGY_PATH
     project_id = _get_active_project_id()
@@ -176,11 +177,40 @@ def _apply_active_project() -> None:
     ONTOLOGY_PATH = proj_dir / "ontology.json"
     for d in (INPUT_DIR, OUTPUT_DIR, THUMB_DIR):
         d.mkdir(parents=True, exist_ok=True)
-    settings_store.set_base_dir(proj_dir)
-    prompts_store.set_base_dir(proj_dir)
+    # Keep stores pinned to the shared repo-root files (no-op if already there).
+    settings_store.set_base_dir(BASE_DIR)
+    prompts_store.set_base_dir(BASE_DIR)
+
+
+def _migrate_global_settings_and_prompts() -> None:
+    """One-time hoist: if root-level ai_settings / prompts_settings are
+    missing, copy them from the active project (or default / any project
+    that has them) so existing per-project configs aren't lost when settings
+    became global."""
+    active = _get_active_project_id()
+    candidates = []
+    if (PROJECTS_DIR / active).is_dir():
+        candidates.append(PROJECTS_DIR / active)
+    if (PROJECTS_DIR / "default").is_dir() and active != "default":
+        candidates.append(PROJECTS_DIR / "default")
+    if PROJECTS_DIR.is_dir():
+        for p in sorted(PROJECTS_DIR.iterdir()):
+            if p.is_dir() and p not in candidates:
+                candidates.append(p)
+
+    for filename in ("ai_settings.json", "prompts_settings.json"):
+        dest = BASE_DIR / filename
+        if dest.exists():
+            continue
+        for src_dir in candidates:
+            src = src_dir / filename
+            if src.exists() and src.stat().st_size > 2:
+                shutil.copy2(src, dest)
+                break
 
 
 _migrate_legacy_root_data()
+_migrate_global_settings_and_prompts()
 _apply_active_project()
 
 app = Flask(__name__)
@@ -189,14 +219,9 @@ app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200MB total upload cap
 
 @app.before_request
 def _rebind_active_project():
-    """Every request re-reads active_project.json and repoints path globals.
-
-    Required under multi-worker gunicorn: ``set_base_dir`` only updates the
-    worker that handled create/activate. Without this, Settings save can
-    write ``ai_settings.json`` / ``prompts_settings.json`` under one path
-    while Cheap/Main AI readiness on another worker reads a different
-    (empty) file — keys look unset and a second Save from a blank UI wipe
-    the real prompts.
+    """Every request re-reads active_project.json and repoints project-local
+    path globals (papers, output, targets). API keys / prompts stay global
+    at the repo root and are not project-scoped.
     """
     _apply_active_project()
 

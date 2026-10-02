@@ -3,9 +3,9 @@
 Each prompt is a function returning (system, user) strings so that context
 (targets, ontology, chunk text) can be injected at call time. The actual
 prompt text is no longer hardcoded here — it's stored in `prompts_settings.json`
-at the project root and editable from the Settings page (see
-meta_pipeline.prompts_store). These functions just declare *which* placeholders
-each stage supports and delegate the lookup + fill to that store.
+at the repo root (global across projects) and editable from the Settings page
+(see meta_pipeline.prompts_store). These functions just declare *which*
+placeholders each stage supports and delegate the lookup + fill to that store.
 
 While a stage's template is still blank (the out-of-the-box state), this
 returns ("", ""), and llm.py's blank-prompt check short-circuits the API call —

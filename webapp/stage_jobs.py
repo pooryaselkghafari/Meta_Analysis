@@ -118,14 +118,20 @@ def output_dir_for(project_id: str) -> Path:
 
 
 def _bind_project_stores(project_id: str) -> Path:
-    """Point settings/prompts stores at this project and return its output dir."""
+    """Ensure the project's output dir exists and return it.
+
+    API keys / prompts are global at the repo root — do not rebind them to
+    the project directory (settings_store / prompts_store ignore project
+    paths by design).
+    """
     proj = project_dir(project_id)
     if not proj.is_dir():
         raise FileNotFoundError(f"project not found: {project_id}")
     out = proj / "output"
     out.mkdir(parents=True, exist_ok=True)
-    settings_store.set_base_dir(proj)
-    prompts_store.set_base_dir(proj)
+    # Pin stores to the shared root (no-op if already there).
+    settings_store.set_base_dir(_BASE_DIR)
+    prompts_store.set_base_dir(_BASE_DIR)
     return out
 
 

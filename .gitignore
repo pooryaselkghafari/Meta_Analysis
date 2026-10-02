@@ -1,7 +1,9 @@
-# API keys / model + provider settings
+# API keys / model + provider settings (global across projects)
 ai_settings.json
+# Prompt templates (global across projects)
+prompts_settings.json
 
-# Per-project data (uploaded PDFs, extracted records, targets, prompts,
+# Per-project data (uploaded PDFs, extracted records, targets,
 # project registry) — not code, and this repo is public, so paper content
 # and any extracted data stays local rather than getting pushed.
 projects/
