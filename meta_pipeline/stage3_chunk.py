@@ -215,15 +215,30 @@ def _find_flattened_table_blocks(lines: List[str],
     n = len(lines)
     signals = [_line_table_signal(ln) for ln in lines]
 
+    # Boolean mask — O(1) occupied checks. The previous any()-over-spans
+    # version was O(tables) per line and could dominate on long OCR docs.
+    occupied_mask = [False] * n
+    for a, b in occupied:
+        lo = max(0, a)
+        hi = min(n - 1, b)
+        for idx in range(lo, hi + 1):
+            occupied_mask[idx] = True
+
     def _is_occupied(idx: int) -> bool:
-        return any(a <= idx <= b for a, b in occupied)
+        return occupied_mask[idx]
+
+    # Prefix counts of coef/stat lines so density queries are O(1).
+    coefish = [0] * (n + 1)
+    for i, s in enumerate(signals):
+        coefish[i + 1] = coefish[i] + (1 if s in ("coef", "stat") else 0)
 
     def _coef_density(lo: int, hi: int) -> float:
-        window = signals[lo:hi]
-        if not window:
+        lo = max(0, lo)
+        hi = min(n, hi)
+        width = hi - lo
+        if width <= 0:
             return 0.0
-        hits = sum(1 for s in window if s in ("coef", "stat"))
-        return hits / len(window)
+        return (coefish[hi] - coefish[lo]) / width
 
     blocks: List[Tuple[int, int]] = []
     i = 0
@@ -287,19 +302,25 @@ def _find_flattened_table_blocks(lines: List[str],
 
     # Merge overlapping / near-adjacent blocks. A caption block often abuts a
     # trailing coefficient run separated only by a Note:/blank gap (common
-    # when the PDF puts overflow columns after the footnote).
+    # when the PDF puts overflow columns after the footnote). Do NOT merge
+    # across a discussion/prose line — that used to glue hundreds of tables
+    # into one giant chunk and stall corpus analyze.
     if not blocks:
         return []
     blocks.sort()
     merged: List[Tuple[int, int]] = [blocks[0]]
     for a, b in blocks[1:]:
         pa, pb = merged[-1]
+        if a <= pb + 1:
+            merged[-1] = (pa, max(pb, b))
+            continue
         gap = lines[pb + 1:a]
-        gap_ok = a <= pb + 2 or (
+        gap_ok = (
             a <= pb + 12
+            and len(gap) > 0
             and all(_line_table_signal(ln) in ("blank", "footer", "short") for ln in gap)
         )
-        if a <= pb + 1 or gap_ok:
+        if gap_ok:
             merged[-1] = (pa, max(pb, b))
         else:
             merged.append((a, b))
@@ -361,11 +382,18 @@ def chunk_paper(paper: ParsedPaper, cfg: ChunkConfig) -> List[Chunk]:
     consumed_spans: List[Tuple[int, int]] = []
     counter = 0
 
+    # Only look ~N lines around each table for context paragraphs. Joining
+    # lines[:start] / lines[end:] for every table is O(tables × doc) and can
+    # freeze chunking on long OCR'd papers with many false-positive tables.
+    _CTX_LINE_PAD = 80
+
     # ---- 1. table-anchored chunks (markdown pipes OR flattened coef blocks) ----
     for (start, end) in table_blocks:
         table_text = "\n".join(lines[start:end + 1])
-        before_text = "\n".join(lines[:start])
-        after_text = "\n".join(lines[end + 1:])
+        before_lo = max(0, start - _CTX_LINE_PAD)
+        after_hi = min(len(lines), end + 1 + _CTX_LINE_PAD)
+        before_text = "\n".join(lines[before_lo:start])
+        after_text = "\n".join(lines[end + 1:after_hi])
         before, after = _context_paragraphs(
             before_text, after_text, cfg.paras_before_table, cfg.paras_after_table
         )
@@ -381,12 +409,29 @@ def chunk_paper(paper: ParsedPaper, cfg: ChunkConfig) -> List[Chunk]:
         consumed_spans.append((start, end))
 
     # ---- 2. prose chunks from the remaining (non-table) text ----
-    # Mask table lines so prose chunking doesn't re-include them.
-    masked_lines = list(lines)
-    for (start, end) in consumed_spans:
-        for idx in range(start, end + 1):
-            masked_lines[idx] = ""
-    prose = "\n".join(masked_lines)
+    # Mask table lines so prose chunking doesn't re-include them. Build the
+    # prose string from non-empty runs only so we don't materialize a second
+    # full-size copy of a huge doc as mostly blank lines.
+    if consumed_spans:
+        occupied = [False] * len(lines)
+        for (start, end) in consumed_spans:
+            for idx in range(start, end + 1):
+                if 0 <= idx < len(lines):
+                    occupied[idx] = True
+        prose_parts: List[str] = []
+        gap = False
+        for idx, ln in enumerate(lines):
+            if occupied[idx]:
+                gap = True
+                continue
+            if gap and prose_parts:
+                prose_parts.append("")
+                gap = False
+            prose_parts.append(ln)
+        prose = "\n".join(prose_parts)
+    else:
+        prose = "\n".join(lines)
+
     for para_block in _sliding_prose(prose, cfg):
         counter += 1
         chunks.append(Chunk(

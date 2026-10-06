@@ -26,6 +26,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -73,6 +74,8 @@ PROGRESS_DEFAULTS: Dict[str, dict] = {
         "papers_failed": 0,
         "chunks_total": 0,
         "chunks_kept": 0,
+        "heartbeat_at": None,
+        "chunk_warnings": None,
         "error": None,
     },
     "classify": {
@@ -573,6 +576,27 @@ def _dedupe_rounded_records(records: list):
 # --------------------------------------------------------------------------- #
 # Job implementations
 # --------------------------------------------------------------------------- #
+def _chunk_paper_with_timeout(pipeline, paper, timeout_s: float = 90.0):
+    """Run ``pipeline.chunk([paper])`` with a wall-clock timeout.
+
+    Uses SIGALRM on the job process main thread so a pathological OCR'd paper
+    can't freeze the whole corpus analyze at one paper forever.
+    """
+    if timeout_s <= 0 or not hasattr(signal, "SIGALRM"):
+        return pipeline.chunk([paper])
+
+    def _handler(signum, frame):
+        raise TimeoutError(f"chunking exceeded {timeout_s:.0f}s")
+
+    previous = signal.signal(signal.SIGALRM, _handler)
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        return pipeline.chunk([paper])
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def run_analyze_job(project_id: str) -> None:
     """Corpus parse + heuristic filter (no LLM). Per-paper progress with pause/stop.
 
@@ -631,30 +655,89 @@ def run_analyze_job(project_id: str) -> None:
             # Steps finished before this paper + in-progress feel: show i
             # completed parse-steps; UI uses paper_index for "k of n papers".
             progress["completed"] = i
+            progress["heartbeat_at"] = time.time()
             write_progress(project_id, "analyze", progress)
 
+            t_paper = time.time()
             paper = stage1_parse.parse_paper(str(pdf), cfg.marker)
             papers.append(paper)
+            print(
+                f"[analyze] parse {i+1}/{n_papers} {pdf.stem!r} "
+                f"ok={paper.parse_ok} md_chars={len(paper.markdown or '')} "
+                f"in {time.time()-t_paper:.2f}s",
+                flush=True,
+            )
             progress["papers_ok"] = sum(1 for p in papers if p.parse_ok)
             progress["papers_failed"] = sum(1 for p in papers if not p.parse_ok)
             progress["completed"] = i + 1
+            progress["heartbeat_at"] = time.time()
             write_progress(project_id, "analyze", progress)
 
         pipeline = Pipeline(cfg)
         all_chunks = []
+        chunk_notes: List[str] = []
         for i, paper in enumerate(papers):
             _wait_if_paused(project_id, "analyze", progress)
             progress["paper_id"] = paper.paper_id
             progress["paper_index"] = i + 1
             progress["phase"] = "chunking"
             progress["completed"] = n_papers + i
+            progress["heartbeat_at"] = time.time()
             write_progress(project_id, "analyze", progress)
 
-            paper_chunks = pipeline.chunk([paper])
+            # Heartbeat so the UI can tell a long paper is still working
+            # rather than frozen at the same %.
+            stop_beat = threading.Event()
+
+            def _beat(prog=progress, pid=project_id, stop=stop_beat):
+                while not stop.wait(2.0):
+                    try:
+                        prog["heartbeat_at"] = time.time()
+                        write_progress(pid, "analyze", prog)
+                    except Exception:
+                        break
+
+            beat_thread = threading.Thread(target=_beat, daemon=True)
+            beat_thread.start()
+            t_paper = time.time()
+            try:
+                paper_chunks = _chunk_paper_with_timeout(pipeline, paper, timeout_s=90.0)
+                print(
+                    f"[analyze] chunk {i+1}/{n_papers} {paper.paper_id!r} "
+                    f"chunks={len(paper_chunks)} md_chars={len(paper.markdown or '')} "
+                    f"in {time.time()-t_paper:.2f}s",
+                    flush=True,
+                )
+            except TimeoutError:
+                paper_chunks = []
+                chunk_notes.append(
+                    f"Skipped chunking for {paper.paper_id} (timed out after 90s)."
+                )
+                print(
+                    f"[analyze] chunk TIMEOUT {i+1}/{n_papers} {paper.paper_id!r} "
+                    f"after {time.time()-t_paper:.2f}s",
+                    flush=True,
+                )
+            except Exception as e:
+                paper_chunks = []
+                chunk_notes.append(
+                    f"Skipped chunking for {paper.paper_id} ({type(e).__name__}: {e})."
+                )
+                print(
+                    f"[analyze] chunk ERROR {i+1}/{n_papers} {paper.paper_id!r}: {e}",
+                    flush=True,
+                )
+            finally:
+                stop_beat.set()
+                beat_thread.join(timeout=1.0)
+
             all_chunks.extend(paper_chunks)
 
             progress["chunks_total"] = len(all_chunks)
             progress["completed"] = n_papers + i + 1
+            progress["heartbeat_at"] = time.time()
+            if chunk_notes:
+                progress["chunk_warnings"] = chunk_notes[-5:]
             write_progress(project_id, "analyze", progress)
 
         _wait_if_paused(project_id, "analyze", progress)

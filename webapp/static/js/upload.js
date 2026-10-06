@@ -153,6 +153,11 @@ function setPauseButton(paused) {
   pauseBtn.disabled = false;
 }
 
+function shortName(id) {
+  if (!id) return '';
+  return id.length > 42 ? id.slice(0, 40) + '…' : id;
+}
+
 function applyAnalyzeProgress(p) {
   const done = p.completed ?? 0;
   const total = p.total || 0;
@@ -162,8 +167,9 @@ function applyAnalyzeProgress(p) {
 
   const nPapers = p.papers_total || Math.ceil(total / 2) || 0;
   const idx = p.paper_index || 0;
-  const paperBit = p.paper_id
-    ? (idx ? `paper ${idx}/${nPapers}: "${p.paper_id}"` : `"${p.paper_id}"`)
+  const name = shortName(p.paper_id);
+  const paperBit = name
+    ? (idx ? `paper ${idx}/${nPapers}: "${name}"` : `"${name}"`)
     : (nPapers ? `${nPapers} papers` : '');
 
   let phaseLabel = 'Working';
@@ -173,15 +179,14 @@ function applyAnalyzeProgress(p) {
   else if (p.phase === 'writing') phaseLabel = 'Writing results';
   else if (p.phase === 'done') phaseLabel = 'Finishing';
 
-  if (p.paused) {
-    analyzeProgressLabel.textContent = `Paused — ${phaseLabel} ${paperBit} — ${pct}%`;
-    analyzeStatus.textContent = `Paused. ${phaseLabel} ${paperBit}.`;
-    analyzeStatus.classList.remove('busy');
-  } else {
-    analyzeProgressLabel.textContent = `${phaseLabel}${paperBit ? ` — ${paperBit}` : ''} — ${pct}%`;
-    analyzeStatus.textContent = `${phaseLabel}${paperBit ? ` — ${paperBit}` : ''}…`;
-    analyzeStatus.classList.add('busy');
-  }
+  let label = `${phaseLabel}${paperBit ? ` — ${paperBit}` : ''} — ${pct}%`;
+  if (p.paused) label = `Paused — ${label}`;
+  analyzeProgressLabel.textContent = label;
+
+  // Keep the status line for final/error messages only — don't duplicate
+  // the progress label while a run is in flight.
+  analyzeStatus.textContent = '';
+  analyzeStatus.classList.toggle('busy', !p.paused && !!p.running);
 }
 
 function showSummaryFromProgress(p) {
@@ -209,9 +214,13 @@ function finishAnalyzeUi(finalProgress, wasUpdate) {
     analyzeStatus.textContent = `${finalProgress.error} (${finalProgress.completed || 0}/${finalProgress.total || 0} papers before the error).`;
   } else {
     showSummaryFromProgress(finalProgress);
+    const warnings = (finalProgress.chunk_warnings || []).filter(Boolean);
     analyzeStatus.textContent = wasUpdate
       ? 'Done. Downstream Cheap AI / Detection AI results were cleared — re-run them from their pages.'
       : 'Done.';
+    if (warnings.length) {
+      analyzeStatus.textContent += ' ' + warnings.join(' ');
+    }
     updateAnalyzeLabel(true);
   }
   analyzeStatus.classList.remove('busy');
