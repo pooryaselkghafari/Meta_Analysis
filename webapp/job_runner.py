@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Detached entrypoint for durable classify/detect/extract jobs.
+"""Detached entrypoint for durable analyze/classify/detect/extract jobs.
 
 Spawned by ``stage_jobs.start_job`` via ``subprocess.Popen(..., start_new_session=True)``
 so the job outlives the gunicorn/Flask worker that accepted the HTTP start
 request. Progress is written to ``projects/<id>/output/_progress_<stage>.json``.
 
 Usage:
+    python webapp/job_runner.py analyze <project_id>
     python webapp/job_runner.py classify <project_id>
     python webapp/job_runner.py detect <project_id>
     python webapp/job_runner.py extract <project_id>
@@ -27,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
     if len(args) != 2 or args[0] not in stage_jobs.JOB_FUNCS:
         print(
-            "usage: job_runner.py <classify|detect|extract> <project_id>",
+            "usage: job_runner.py <analyze|classify|detect|extract> <project_id>",
             file=sys.stderr,
         )
         return 2

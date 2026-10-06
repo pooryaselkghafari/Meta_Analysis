@@ -126,27 +126,149 @@ async function overrideChunk(paperId, chunkId, passesFilter) {
 
 nextStageBtn.addEventListener('click', () => { window.location.href = '/cheap-ai'; });
 
+const pauseBtn = document.getElementById('pause-btn');
+const stopBtn = document.getElementById('stop-btn');
+
+function setPauseButton(paused) {
+  pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+  pauseBtn.classList.toggle('is-paused', paused);
+  pauseBtn.disabled = false;
+}
+
+function applyAnalyzeProgress(p) {
+  const done = p.completed || 0;
+  const total = p.total || 0;
+  setPauseButton(!!p.paused);
+  const phase = p.phase === 'chunking' ? 'Chunking & filtering'
+    : p.phase === 'done' ? 'Finishing'
+    : 'Parsing';
+  if (p.paused) {
+    stageStatus.textContent = `Paused — ${done}/${total} papers.`;
+    stageStatus.classList.remove('busy');
+  } else {
+    stageStatus.textContent = p.paper_id
+      ? `${phase}: "${p.paper_id}" — ${done}/${total}`
+      : `${phase}… ${done}/${total}`;
+    stageStatus.classList.add('busy');
+  }
+}
+
+async function pollUntilAnalyzeDone() {
+  for (;;) {
+    let p;
+    try {
+      const res = await fetch('/api/analyze/progress');
+      p = await res.json();
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 1500));
+      continue;
+    }
+    applyAnalyzeProgress(p);
+    if (!p.running) return p;
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
+
+stopBtn.addEventListener('click', async () => {
+  if (!confirm('Stop this run? The previous corpus (if any) is kept.')) return;
+  stopBtn.disabled = true;
+  pauseBtn.disabled = true;
+  try {
+    const res = await fetch('/api/analyze/stop', { method: 'POST' });
+    if (!res.ok) {
+      const p = await res.json();
+      alert(p.error || 'Could not stop the job.');
+      stopBtn.disabled = false;
+      pauseBtn.disabled = false;
+    }
+  } catch (e) {
+    stopBtn.disabled = false;
+    pauseBtn.disabled = false;
+  }
+});
+
+pauseBtn.addEventListener('click', async () => {
+  pauseBtn.disabled = true;
+  const isPaused = pauseBtn.classList.contains('is-paused');
+  const endpoint = isPaused ? '/api/analyze/resume' : '/api/analyze/pause';
+  try {
+    const res = await fetch(endpoint, { method: 'POST' });
+    const p = await res.json();
+    if (res.ok) applyAnalyzeProgress(p);
+    else pauseBtn.disabled = false;
+  } catch (e) {
+    pauseBtn.disabled = false;
+  }
+});
+
 updateBtn.addEventListener('click', async () => {
   updateBtn.disabled = true;
-  stageStatus.textContent = 'Re-running Corpus parse & heuristic filter…';
+  stageStatus.textContent = 'Starting corpus analysis…';
   stageStatus.classList.add('busy');
+  pauseBtn.hidden = false;
+  stopBtn.hidden = false;
+  setPauseButton(false);
   try {
     const res = await fetch('/api/analyze', { method: 'POST' });
     const data = await res.json();
-    if (!res.ok) {
+    if (!res.ok && res.status !== 409) {
+      pauseBtn.hidden = true;
+      stopBtn.hidden = true;
       stageStatus.textContent = data.error || 'Re-analysis failed.';
       stageStatus.classList.remove('busy');
       updateBtn.disabled = false;
       return;
     }
-    stageStatus.textContent = 'Done. Downstream Cheap AI / Detection AI results were cleared — re-run them from their pages.';
+    const finalProgress = await pollUntilAnalyzeDone();
+    pauseBtn.hidden = true;
+    stopBtn.hidden = true;
+    stopBtn.disabled = false;
+    if (finalProgress.stopped) {
+      stageStatus.textContent = finalProgress.error
+        || `Stopped — ${finalProgress.completed || 0}/${finalProgress.total || 0} papers. Previous corpus left unchanged.`;
+    } else if (finalProgress.error) {
+      stageStatus.textContent = `${finalProgress.error} (${finalProgress.completed || 0}/${finalProgress.total || 0} before error).`;
+    } else {
+      stageStatus.textContent = 'Done. Downstream Cheap AI / Detection AI results were cleared — re-run them from their pages.';
+    }
     stageStatus.classList.remove('busy');
     await loadPapers();
   } catch (e) {
+    pauseBtn.hidden = true;
+    stopBtn.hidden = true;
     stageStatus.textContent = 'Re-analysis failed — check the server log.';
     stageStatus.classList.remove('busy');
   }
   updateBtn.disabled = false;
 });
 
+async function resumeAnalyzeIfRunning() {
+  try {
+    const res = await fetch('/api/analyze/progress');
+    const p = await res.json();
+    if (!p.running) return;
+    updateBtn.disabled = true;
+    pauseBtn.hidden = false;
+    stopBtn.hidden = false;
+    applyAnalyzeProgress(p);
+    const finalProgress = await pollUntilAnalyzeDone();
+    pauseBtn.hidden = true;
+    stopBtn.hidden = true;
+    if (finalProgress.stopped) {
+      stageStatus.textContent = finalProgress.error
+        || `Stopped — ${finalProgress.completed || 0}/${finalProgress.total || 0} papers.`;
+    } else if (finalProgress.error) {
+      stageStatus.textContent = finalProgress.error;
+    } else {
+      stageStatus.textContent = 'Done. Downstream Cheap AI / Detection AI results were cleared — re-run them from their pages.';
+    }
+    stageStatus.classList.remove('busy');
+    updateBtn.disabled = false;
+    await loadPapers();
+  } catch (e) {
+    // ignore
+  }
+}
+
 loadPapers();
+resumeAnalyzeIfRunning();

@@ -59,7 +59,17 @@
       <div class="hint">Press Enter or comma to add. Cross-price elasticities match two products from this list — no need to enter pairs separately.</div>
 
       <div class="analyze-bar">
-        <button class="btn-primary" id="analyze-btn">Analyze</button>
+        <div class="analyze-bar-controls">
+          <button class="btn-primary" id="analyze-btn">Analyze</button>
+          <button class="btn-secondary" id="pause-btn" hidden>Pause</button>
+          <button class="btn-secondary" id="stop-btn" hidden>Stop</button>
+        </div>
+        <div class="classify-progress" id="analyze-progress" hidden>
+          <div class="classify-progress-track">
+            <div class="classify-progress-fill" id="analyze-progress-fill"></div>
+          </div>
+          <div class="classify-progress-label" id="analyze-progress-label"></div>
+        </div>
         <span class="analyze-status" id="analyze-status"></span>
       </div>
 

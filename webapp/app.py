@@ -40,7 +40,7 @@ from werkzeug.utils import secure_filename
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from meta_pipeline import Pipeline, PipelineConfig, LLMClient, settings_store  # noqa: E402
+from meta_pipeline import LLMClient, settings_store  # noqa: E402
 from meta_pipeline import prompts_store, AVAILABLE_MODELS, effort_levels_for  # noqa: E402
 from meta_pipeline.models import ChunkType  # noqa: E402
 import regression  # noqa: E402 — Stage 5: meta-regression over records.json
@@ -523,41 +523,58 @@ def get_food_groups():
 
 
 # --------------------------------------------------------------------------- #
-# Analysis (deterministic stages only, for now)
+# Analysis (deterministic Stage 1/3: parse + heuristic filter)
+# Runs as a durable background job — same pattern as Cheap/Detection/Main AI —
+# so Marker parses survive proxy timeouts and support pause/stop.
 # --------------------------------------------------------------------------- #
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
-    n_papers = len(list(INPUT_DIR.glob("*.pdf")))
-    if n_papers == 0:
+    """Start corpus analyze as a detached job. Returns immediately; poll
+    ``/api/analyze/progress`` until ``running`` is false."""
+    pdfs = sorted(INPUT_DIR.glob("*.pdf"))
+    if not pdfs:
         return jsonify({"error": "no papers uploaded"}), 400
 
-    # Corpus rebuild invalidates every AI stage — kill paused/running jobs so
-    # their progress files can't resurrect the old totals on later pages.
-    stage_jobs.stop_all_jobs(
-        _get_active_project_id(),
-        reason="Cleared because the corpus was re-analyzed.",
-    )
+    project_id = _get_active_project_id()
+    try:
+        stage_jobs.start_job(
+            project_id, "analyze",
+            total=len(pdfs),
+            paper_id=pdfs[0].stem,
+        )
+    except RuntimeError as e:
+        return jsonify({"error": str(e)}), 409
+    return jsonify({"started": True, "total": len(pdfs)})
 
-    cfg = PipelineConfig(
-        input_dir=str(INPUT_DIR),
-        output_dir=str(OUTPUT_DIR),
-        targets_path=str(TARGETS_PATH),
-        ontology_path=str(ONTOLOGY_PATH),
-        run_llm_stages=False,  # heuristic filter only — cheap-AI stages come later
-    )
-    # Always build from the Settings page's saved models/keys, even though this
-    # endpoint doesn't call the LLM yet (run_llm_stages=False) — so the moment
-    # LLM stages are turned on here, they immediately honor whatever is
-    # configured on /settings rather than silently using the code defaults.
-    cfg.model = settings_store.load_model_config()
-    pipeline = Pipeline(cfg)
-    summary = pipeline.run()
-    _clear_thumbnail_cache_for_missing_papers()
-    # No explicit "mark done" needed — pipeline.run() just rewrote
-    # chunks_kept.json from scratch with fresh, unclassified Chunk objects, so
-    # _load_state() will naturally recompute cheap_ai_done/detection_ai_done
-    # as False on the next read, re-greying those pages automatically.
-    return jsonify(summary)
+
+@app.route("/api/analyze/progress", methods=["GET"])
+def analyze_progress():
+    return jsonify(stage_jobs.reconcile_stale_job(_get_active_project_id(), "analyze"))
+
+
+@app.route("/api/analyze/pause", methods=["POST"])
+def analyze_pause():
+    project_id = _get_active_project_id()
+    progress = stage_jobs.read_progress(project_id, "analyze")
+    progress["paused"] = True
+    stage_jobs.write_progress(project_id, "analyze", progress)
+    return jsonify(progress)
+
+
+@app.route("/api/analyze/resume", methods=["POST"])
+def analyze_resume():
+    project_id = _get_active_project_id()
+    progress = stage_jobs.read_progress(project_id, "analyze")
+    progress["paused"] = False
+    stage_jobs.write_progress(project_id, "analyze", progress)
+    return jsonify(progress)
+
+
+@app.route("/api/analyze/stop", methods=["POST"])
+def analyze_stop():
+    progress = stage_jobs.stop_job(_get_active_project_id(), "analyze", reason=None)
+    progress["stopped"] = True
+    return jsonify(progress)
 
 
 # --------------------------------------------------------------------------- #

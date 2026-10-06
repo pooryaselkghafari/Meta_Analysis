@@ -1,6 +1,6 @@
-"""Durable stage jobs for classify / detect / extract.
+"""Durable stage jobs for analyze / classify / detect / extract.
 
-Each long-running AI stage runs in a **detached subprocess** (see
+Each long-running stage runs in a **detached subprocess** (see
 ``job_runner.py`` + ``start_job``), not inside a gunicorn/Flask worker
 request or a daemon thread. The HTTP layer only:
 
@@ -15,7 +15,9 @@ can read/write. The frontend polls that file until ``running`` is false.
 
 This survives nginx/gunicorn request timeouts and model latency changes —
 those only affect how long the job process runs, not whether the HTTP
-request stays open.
+request stays open. Corpus analyze used to run inside the request; heavy
+Marker parses would hang the UI and never write results if the worker
+timed out.
 """
 from __future__ import annotations
 
@@ -43,17 +45,34 @@ from meta_pipeline.models import ChunkType  # noqa: E402
 PROJECTS_DIR = _BASE_DIR / "projects"
 JOB_RUNNER = _WEBAPP_DIR / "job_runner.py"
 
-STAGES = ("classify", "detect", "extract")
+STAGES = ("analyze", "classify", "detect", "extract")
 
 # When an earlier stage is re-started, these later jobs (and their paused
 # progress files) are obsolete and must be stopped/cleared.
 DOWNSTREAM_STAGES: Dict[str, Tuple[str, ...]] = {
+    "analyze": ("classify", "detect", "extract"),
     "classify": ("detect", "extract"),
     "detect": ("extract",),
     "extract": (),
 }
 
 PROGRESS_DEFAULTS: Dict[str, dict] = {
+    "analyze": {
+        "running": False,
+        "paused": False,
+        "stop_requested": False,
+        "stopped": False,
+        "pid": None,
+        "paper_id": None,
+        "phase": None,
+        "total": 0,
+        "completed": 0,
+        "papers_ok": 0,
+        "papers_failed": 0,
+        "chunks_total": 0,
+        "chunks_kept": 0,
+        "error": None,
+    },
     "classify": {
         "running": False,
         "paused": False,
@@ -552,6 +571,105 @@ def _dedupe_rounded_records(records: list):
 # --------------------------------------------------------------------------- #
 # Job implementations
 # --------------------------------------------------------------------------- #
+def run_analyze_job(project_id: str) -> None:
+    """Corpus parse + heuristic filter (no LLM). Per-paper progress with pause/stop.
+
+    Writes outputs only on successful completion so a mid-run Stop leaves the
+    previous corpus intact instead of a half-parsed tree.
+    """
+    from meta_pipeline import Pipeline, PipelineConfig, settings_store
+    from meta_pipeline import stage1_parse
+
+    out = _bind_project_stores(project_id)
+    _adopt_lock(project_id, "analyze")
+    proj = project_dir(project_id)
+    input_dir = proj / "input_papers"
+    targets_path = proj / "targets.json"
+    ontology_path = proj / "ontology.json"
+
+    pdfs = sorted(input_dir.glob("*.pdf"))
+    total = len(pdfs)
+    progress = dict(PROGRESS_DEFAULTS["analyze"])
+    progress.update(
+        running=True, paused=False, stop_requested=False, stopped=False,
+        pid=os.getpid(), paper_id=pdfs[0].stem if pdfs else None,
+        phase="parsing", total=total, completed=0,
+        papers_ok=0, papers_failed=0, chunks_total=0, chunks_kept=0, error=None,
+    )
+    write_progress(project_id, "analyze", progress)
+
+    if not pdfs:
+        progress["running"] = False
+        progress["error"] = "no papers uploaded"
+        write_progress(project_id, "analyze", progress)
+        _release_lock(project_id, "analyze")
+        return
+
+    cfg = PipelineConfig(
+        input_dir=str(input_dir),
+        output_dir=str(out),
+        targets_path=str(targets_path),
+        ontology_path=str(ontology_path),
+        run_llm_stages=False,
+    )
+    cfg.model = settings_store.load_model_config()
+
+    papers = []
+    try:
+        for i, pdf in enumerate(pdfs):
+            _wait_if_paused(project_id, "analyze", progress)
+            progress["paper_id"] = pdf.stem
+            progress["phase"] = "parsing"
+            progress["completed"] = i
+            write_progress(project_id, "analyze", progress)
+
+            paper = stage1_parse.parse_paper(str(pdf), cfg.marker)
+            papers.append(paper)
+            progress["papers_ok"] = sum(1 for p in papers if p.parse_ok)
+            progress["papers_failed"] = sum(1 for p in papers if not p.parse_ok)
+            progress["completed"] = i + 1
+            write_progress(project_id, "analyze", progress)
+
+        _wait_if_paused(project_id, "analyze", progress)
+        progress["phase"] = "chunking"
+        progress["paper_id"] = None
+        write_progress(project_id, "analyze", progress)
+
+        pipeline = Pipeline(cfg)
+        chunks = pipeline.chunk(papers)
+        kept = pipeline.filter_chunks(chunks)
+        # Deterministic corpus only — clear LLM-stage artifacts so Cheap /
+        # Detection / Main AI re-run on the new chunk set.
+        pipeline._write_outputs(papers, chunks, kept, [], {})
+
+        # Drop thumbnails for papers that no longer exist.
+        thumb_dir = out / "thumbnails"
+        if thumb_dir.is_dir():
+            existing = {p.stem for p in pdfs}
+            for thumb in thumb_dir.glob("*.png"):
+                if thumb.stem not in existing:
+                    try:
+                        thumb.unlink()
+                    except OSError:
+                        pass
+
+        progress["chunks_total"] = len(chunks)
+        progress["chunks_kept"] = len(kept)
+        progress["completed"] = total
+        progress["phase"] = "done"
+    except JobStopped:
+        progress["stopped"] = True
+        # Leave previous chunks.json / records intact.
+    except Exception as e:
+        progress["error"] = str(e)
+    finally:
+        progress["running"] = False
+        progress["paused"] = False
+        progress["stop_requested"] = False
+        write_progress(project_id, "analyze", progress)
+        _release_lock(project_id, "analyze")
+
+
 def run_classify_job(project_id: str) -> None:
     out = _bind_project_stores(project_id)
     _adopt_lock(project_id, "classify")
@@ -868,6 +986,7 @@ def run_extract_job(project_id: str) -> None:
 
 
 JOB_FUNCS: Dict[str, Callable[[str], None]] = {
+    "analyze": run_analyze_job,
     "classify": run_classify_job,
     "detect": run_detect_job,
     "extract": run_extract_job,
@@ -892,15 +1011,20 @@ def start_job(project_id: str, stage: str, total: int, paper_id: Optional[str] =
     progress = dict(PROGRESS_DEFAULTS[stage])
     progress.update(
         running=True, pid=None, paper_id=paper_id,
-        chunk_index=0, total=total, completed=0, error=None,
+        total=total, completed=0, error=None,
         paused=False, stop_requested=False, stopped=False,
     )
-    if stage == "classify":
-        progress.update(classified=0, parse_failed=0)
+    if stage == "analyze":
+        progress.update(
+            phase="parsing", papers_ok=0, papers_failed=0,
+            chunks_total=0, chunks_kept=0,
+        )
+    elif stage == "classify":
+        progress.update(chunk_index=0, classified=0, parse_failed=0)
     elif stage == "detect":
-        progress.update(screened=0, dropped=0)
+        progress.update(chunk_index=0, screened=0, dropped=0)
     else:
-        progress.update(extracted=0, records_found=0, duplicates_removed=0)
+        progress.update(chunk_index=0, extracted=0, records_found=0, duplicates_removed=0)
     write_progress(project_id, stage, progress)
 
     log = log_path(project_id, stage)
