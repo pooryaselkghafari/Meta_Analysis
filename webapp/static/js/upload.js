@@ -154,23 +154,32 @@ function setPauseButton(paused) {
 }
 
 function applyAnalyzeProgress(p) {
-  const done = p.completed || 0;
+  const done = p.completed ?? 0;
   const total = p.total || 0;
-  const pct = total ? Math.round(100 * done / total) : 0;
+  const pct = total ? Math.min(100, Math.round(100 * done / total)) : 0;
   analyzeProgressFill.style.width = `${pct}%`;
   setPauseButton(!!p.paused);
-  const phase = p.phase === 'chunking' ? 'Chunking & filtering'
-    : p.phase === 'done' ? 'Finishing'
-    : 'Parsing';
+
+  const nPapers = p.papers_total || Math.ceil(total / 2) || 0;
+  const idx = p.paper_index || 0;
+  const paperBit = p.paper_id
+    ? (idx ? `paper ${idx}/${nPapers}: "${p.paper_id}"` : `"${p.paper_id}"`)
+    : (nPapers ? `${nPapers} papers` : '');
+
+  let phaseLabel = 'Working';
+  if (p.phase === 'parsing') phaseLabel = 'Parsing';
+  else if (p.phase === 'chunking') phaseLabel = 'Building chunks';
+  else if (p.phase === 'filtering') phaseLabel = 'Filtering';
+  else if (p.phase === 'writing') phaseLabel = 'Writing results';
+  else if (p.phase === 'done') phaseLabel = 'Finishing';
+
   if (p.paused) {
-    analyzeProgressLabel.textContent = `Paused — ${done}/${total} papers — ${pct}%`;
-    analyzeStatus.textContent = `Paused. ${done}/${total} papers done so far.`;
+    analyzeProgressLabel.textContent = `Paused — ${phaseLabel} ${paperBit} — ${pct}%`;
+    analyzeStatus.textContent = `Paused. ${phaseLabel} ${paperBit}.`;
     analyzeStatus.classList.remove('busy');
   } else {
-    analyzeProgressLabel.textContent = p.paper_id
-      ? `${phase}: "${p.paper_id}" — ${done}/${total} papers — ${pct}%`
-      : `${phase} — ${done}/${total} papers — ${pct}%`;
-    analyzeStatus.textContent = `${phase}… ${done}/${total} papers`;
+    analyzeProgressLabel.textContent = `${phaseLabel}${paperBit ? ` — ${paperBit}` : ''} — ${pct}%`;
+    analyzeStatus.textContent = `${phaseLabel}${paperBit ? ` — ${paperBit}` : ''}…`;
     analyzeStatus.classList.add('busy');
   }
 }

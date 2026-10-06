@@ -136,19 +136,25 @@ function setPauseButton(paused) {
 }
 
 function applyAnalyzeProgress(p) {
-  const done = p.completed || 0;
+  const done = p.completed ?? 0;
   const total = p.total || 0;
   setPauseButton(!!p.paused);
-  const phase = p.phase === 'chunking' ? 'Chunking & filtering'
-    : p.phase === 'done' ? 'Finishing'
-    : 'Parsing';
+  const nPapers = p.papers_total || Math.ceil(total / 2) || 0;
+  const idx = p.paper_index || 0;
+  const paperBit = p.paper_id
+    ? (idx ? `paper ${idx}/${nPapers}: "${p.paper_id}"` : `"${p.paper_id}"`)
+    : '';
+  let phaseLabel = 'Working';
+  if (p.phase === 'parsing') phaseLabel = 'Parsing';
+  else if (p.phase === 'chunking') phaseLabel = 'Building chunks';
+  else if (p.phase === 'filtering') phaseLabel = 'Filtering';
+  else if (p.phase === 'writing') phaseLabel = 'Writing results';
+  else if (p.phase === 'done') phaseLabel = 'Finishing';
   if (p.paused) {
-    stageStatus.textContent = `Paused — ${done}/${total} papers.`;
+    stageStatus.textContent = `Paused — ${phaseLabel}${paperBit ? ` — ${paperBit}` : ''}.`;
     stageStatus.classList.remove('busy');
   } else {
-    stageStatus.textContent = p.paper_id
-      ? `${phase}: "${p.paper_id}" — ${done}/${total}`
-      : `${phase}… ${done}/${total}`;
+    stageStatus.textContent = `${phaseLabel}${paperBit ? ` — ${paperBit}` : ''}…`;
     stageStatus.classList.add('busy');
   }
 }

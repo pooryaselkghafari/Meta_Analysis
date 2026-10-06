@@ -67,6 +67,8 @@ PROGRESS_DEFAULTS: Dict[str, dict] = {
         "phase": None,
         "total": 0,
         "completed": 0,
+        "papers_total": 0,
+        "paper_index": 0,
         "papers_ok": 0,
         "papers_failed": 0,
         "chunks_total": 0,
@@ -588,12 +590,17 @@ def run_analyze_job(project_id: str) -> None:
     ontology_path = proj / "ontology.json"
 
     pdfs = sorted(input_dir.glob("*.pdf"))
-    total = len(pdfs)
+    n_papers = len(pdfs)
+    # Two passes (parse, then chunk/filter) so the bar keeps moving after the
+    # last PDF is parsed — otherwise the UI sits at n/n during chunking and
+    # looks frozen.
+    total_steps = max(n_papers * 2, 1)
     progress = dict(PROGRESS_DEFAULTS["analyze"])
     progress.update(
         running=True, paused=False, stop_requested=False, stopped=False,
         pid=os.getpid(), paper_id=pdfs[0].stem if pdfs else None,
-        phase="parsing", total=total, completed=0,
+        phase="parsing", total=total_steps, completed=0,
+        papers_total=n_papers, paper_index=0,
         papers_ok=0, papers_failed=0, chunks_total=0, chunks_kept=0, error=None,
     )
     write_progress(project_id, "analyze", progress)
@@ -619,7 +626,10 @@ def run_analyze_job(project_id: str) -> None:
         for i, pdf in enumerate(pdfs):
             _wait_if_paused(project_id, "analyze", progress)
             progress["paper_id"] = pdf.stem
+            progress["paper_index"] = i + 1
             progress["phase"] = "parsing"
+            # Steps finished before this paper + in-progress feel: show i
+            # completed parse-steps; UI uses paper_index for "k of n papers".
             progress["completed"] = i
             write_progress(project_id, "analyze", progress)
 
@@ -630,17 +640,36 @@ def run_analyze_job(project_id: str) -> None:
             progress["completed"] = i + 1
             write_progress(project_id, "analyze", progress)
 
+        pipeline = Pipeline(cfg)
+        all_chunks = []
+        for i, paper in enumerate(papers):
+            _wait_if_paused(project_id, "analyze", progress)
+            progress["paper_id"] = paper.paper_id
+            progress["paper_index"] = i + 1
+            progress["phase"] = "chunking"
+            progress["completed"] = n_papers + i
+            write_progress(project_id, "analyze", progress)
+
+            paper_chunks = pipeline.chunk([paper])
+            all_chunks.extend(paper_chunks)
+
+            progress["chunks_total"] = len(all_chunks)
+            progress["completed"] = n_papers + i + 1
+            write_progress(project_id, "analyze", progress)
+
         _wait_if_paused(project_id, "analyze", progress)
-        progress["phase"] = "chunking"
+        progress["phase"] = "filtering"
         progress["paper_id"] = None
         write_progress(project_id, "analyze", progress)
 
-        pipeline = Pipeline(cfg)
-        chunks = pipeline.chunk(papers)
-        kept = pipeline.filter_chunks(chunks)
+        kept = pipeline.filter_chunks(all_chunks)
+
+        progress["phase"] = "writing"
+        write_progress(project_id, "analyze", progress)
+
         # Deterministic corpus only — clear LLM-stage artifacts so Cheap /
         # Detection / Main AI re-run on the new chunk set.
-        pipeline._write_outputs(papers, chunks, kept, [], {})
+        pipeline._write_outputs(papers, all_chunks, kept, [], {})
 
         # Drop thumbnails for papers that no longer exist.
         thumb_dir = out / "thumbnails"
@@ -653,15 +682,16 @@ def run_analyze_job(project_id: str) -> None:
                     except OSError:
                         pass
 
-        progress["chunks_total"] = len(chunks)
+        progress["chunks_total"] = len(all_chunks)
         progress["chunks_kept"] = len(kept)
-        progress["completed"] = total
+        progress["completed"] = total_steps
         progress["phase"] = "done"
+        write_progress(project_id, "analyze", progress)
     except JobStopped:
         progress["stopped"] = True
         # Leave previous chunks.json / records intact.
     except Exception as e:
-        progress["error"] = str(e)
+        progress["error"] = f"{type(e).__name__}: {e}"
     finally:
         progress["running"] = False
         progress["paused"] = False
@@ -1017,8 +1047,10 @@ def start_job(project_id: str, stage: str, total: int, paper_id: Optional[str] =
     if stage == "analyze":
         progress.update(
             phase="parsing", papers_ok=0, papers_failed=0,
-            chunks_total=0, chunks_kept=0,
+            chunks_total=0, chunks_kept=0, papers_total=total, paper_index=0,
         )
+        # Caller passes paper count; job expands total to parse+chunk steps.
+        progress["total"] = max(int(total) * 2, 1)
     elif stage == "classify":
         progress.update(chunk_index=0, classified=0, parse_failed=0)
     elif stage == "detect":
